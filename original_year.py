@@ -4,10 +4,12 @@ import re
 import time
 from typing import Optional, List, Tuple, Dict, Any
 import requests
+import os
 
 
 _MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
+token = os.environ.get("DISCOGS_TOKEN")  # export DISCOGS_TOKEN=...
 
 # Keywords that often indicate non-original / non-studio / non-canonical variants
 _BAD_VERSION_RE = re.compile(
@@ -69,7 +71,7 @@ def _http_get_json(
 
 
 def _mb_search_recordings(
-    song_title: str, artist: str, user_agent: str, limit: int = 10
+    song_title: str, artist: str, user_agent: str, limit: int = 25
 ) -> List[dict]:
     headers = {"User-Agent": user_agent}
     query = f'recording:"{song_title}" AND artist:"{artist}"'
@@ -173,7 +175,7 @@ def _musicbrainz_first_year(
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
 
-    recs = _mb_search_recordings(song_title, artist, user_agent=user_agent, limit=12)
+    recs = _mb_search_recordings(song_title, artist, user_agent=user_agent, limit=25)
     if not recs:
         return None
 
@@ -186,8 +188,8 @@ def _musicbrainz_first_year(
 
     candidate_years: List[int] = []
 
-    # Try top N candidates; stop early if we get a very plausible early year
-    for rec in ranked[:4]:
+    # Try all candidates; stop early if we get a very plausible early year
+    for rec in ranked[:(len(ranked))]: 
         rid = rec.get("id")
         if not rid:
             continue
@@ -208,8 +210,8 @@ def _musicbrainz_first_year(
 
         # If we found something, we can keep going a bit for even earlier,
         # but avoid too many calls.
-        if candidate_years:
-            break
+        # if candidate_years:
+        #    break
 
     return min(candidate_years) if candidate_years else None
 
@@ -299,7 +301,7 @@ def _discogs_first_year(
         headers["Authorization"] = f"Discogs token={discogs_token}"
 
     # Inspect a handful of the best-looking results
-    for item in results[:7]:
+    for item in results[:len(results)]:
         rid = item.get("id")
         if not rid:
             continue
@@ -358,7 +360,7 @@ def first_release_year(
     Discogs:
       Pass discogs_token for best reliability.
     """
-    user_agent = "FirstReleaseYearLookup/2.0 (contact: you@example.com)"
+    user_agent = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 
     mb_year = None
     dc_year = None
@@ -390,6 +392,6 @@ if __name__ == "__main__":
 
     for title, art, expected in tests:
         got = first_release_year(
-            title, art, discogs_token=None
+            title, art, discogs_token=token
         )  # add token for best results
         print(f"{art} — {title} | expected {expected} | got {got}")
