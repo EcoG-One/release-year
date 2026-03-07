@@ -59,7 +59,7 @@ def _extract_year(date_str: str) -> Optional[int]:
     if not m:
         return None
     y = int(m.group(1))
-    return y if 1000 <= y <= 2100 else None
+    return y if 1900 <= y <= 2100 else None
 
 
 def _http_get_json(
@@ -71,14 +71,21 @@ def _http_get_json(
 
 
 def _mb_search_recordings(
-    song_title: str, artist: str, user_agent: str, limit: int = 25
+    song_title: str, artist: str, user_agent: str, limit: int = 25, rec_type: str = "single"
 ) -> List[dict]:
     headers = {"User-Agent": user_agent}
-    query = f'recording:"{song_title}" AND artist:"{artist}"'
-    url = f"{_MB_BASE}/recording"
+    if rec_type == "album":
+        query = f'recording:"{song_title}" AND artist:"{artist}" AND NOT disambiguation:live AND NOT title:live'
+        url = f"{_MB_BASE}/recording"
+    else:
+        query = f'recording:"{song_title}" AND artist:"{artist}" AND status:"official" AND type:"single"'
+        url = f"{_MB_BASE}/release"
     params = {"query": query, "fmt": "json", "limit": limit}
     data = _http_get_json(url, headers=headers, params=params)
-    return data.get("recordings") or []
+    if rec_type == "album":
+        return data.get("recordings") or []
+    else:
+        return data.get("releases") or []
 
 
 def _mb_artist_credit_str(rec: dict) -> str:
@@ -174,10 +181,15 @@ def _musicbrainz_first_year(
 ) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
-
+    rec_type = "single"
     recs = _mb_search_recordings(song_title, artist, user_agent=user_agent, limit=25)
     if not recs:
-        return None
+        rec_type = "album"
+        recs = _mb_search_recordings(
+            song_title, artist, user_agent=user_agent, limit=25, type="album"
+        )
+        if not recs:
+            return None
 
     # Rank candidates (cheap) and then fetch details for best few (expensive)
     ranked = sorted(
@@ -205,8 +217,14 @@ def _musicbrainz_first_year(
         if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
             continue
 
-        years = _mb_fetch_recording_years(rid, user_agent=user_agent)
-        candidate_years.extend(years)
+        #  years = _mb_fetch_recording_years(rid, user_agent=user_agent)
+        if rec_type == "album":
+            year = _extract_year(rec.get("first-release-date") or "")
+        else:
+            year = _extract_year(rec.get("date") or "")
+        if not year:
+            continue
+        candidate_years.append(year)
 
         # If we found something, we can keep going a bit for even earlier,
         # but avoid too many calls.
@@ -264,6 +282,7 @@ def _discogs_search(
     user_agent: str,
     token: Optional[str],
     per_page: int = 8,
+    rec_type: str = "single",
 ) -> List[dict]:
     headers = {"User-Agent": user_agent}
     if token:
@@ -271,7 +290,7 @@ def _discogs_search(
 
     url = f"{_DISCOGS_BASE}/database/search"
     params = {
-        "type": "release",
+        "type": "master" if rec_type == "album" else "release",
         "artist": artist,
         "track": song_title,
         "per_page": per_page,
@@ -291,7 +310,11 @@ def _discogs_first_year(
         song_title, artist, user_agent, discogs_token, per_page=10
     )
     if not results:
-        return None
+        results = _discogs_search(
+            song_title, artist, user_agent, discogs_token, per_page=10, rec_type="album"
+        )
+        if not results:
+            return None
 
     years_good: List[int] = []
     years_compilation: List[int] = []
@@ -302,18 +325,16 @@ def _discogs_first_year(
 
     # Inspect a handful of the best-looking results
     for item in results[:len(results)]:
-        rid = item.get("id")
-        if not rid:
+        year_str = item.get("year")
+        if not year_str :
             continue
-
+        year = _extract_year(str(year_str))
+        if not year:
+            continue
+        years_good.append(year)
         # Rate limiting / politeness
-        time.sleep(1.0)
+    """ time.sleep(1.0)
 
-        # Fetch full release details to validate tracklist + artist properly
-        try:
-            rel = _http_get_json(f"{_DISCOGS_BASE}/releases/{rid}", headers=headers)
-        except requests.HTTPError:
-            continue
 
         if _discogs_release_is_bad(rel):
             continue
@@ -337,8 +358,9 @@ def _discogs_first_year(
 
         if is_comp:
             years_compilation.append(y)
-        else:
-            years_good.append(y)
+        else: 
+            
+    """
 
     if years_good:
         return min(years_good)
@@ -365,10 +387,10 @@ def first_release_year(
     mb_year = None
     dc_year = None
 
-    try:
+    """try:
         mb_year = _musicbrainz_first_year(song_title, artist, user_agent=user_agent)
     except requests.RequestException:
-        mb_year = None
+        mb_year = None """
 
     try:
         dc_year = _discogs_first_year(
@@ -384,6 +406,7 @@ def first_release_year(
 if __name__ == "__main__":
     # Your known-good examples (expected “true” year)
     tests = [
+        ("Moonchild", "King Crimson", 1969),
         ("I'm Not In Love", "10cc", 1975),
         ("What's Up?", "4 Non Blondes", 1993),
         ("No Time To Die", "Billie Eilish", 2020),
