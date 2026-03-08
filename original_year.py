@@ -11,6 +11,10 @@ _MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
 token = os.environ.get("DISCOGS_TOKEN")  # export DISCOGS_TOKEN=...
 
+# ------------------------------------
+# Normalization / filtering helpers
+# ------------------------------------
+
 # Keywords that often indicate non-original / non-studio / non-canonical variants
 _BAD_VERSION_RE = re.compile(
     r"""
@@ -29,6 +33,23 @@ _TITLE_NOISE_RE = re.compile(
     r"\s*[\(\[\{].*?[\)\]\}]\s*"
 )  # remove (...) / [...] / {...} parts
 
+# Secondary types to avoid when looking for "first release"
+_BAD_SECONDARY_TYPES = {
+    "compilation",
+    "live",
+    "remix",
+    "dj-mix",
+    "demo",
+    "bootleg",
+    "promotional",
+    "promo",
+    "interview",
+    "audiobook",
+    "audio drama",
+    "spokenword",
+    "field recording",
+    "unofficial"
+}
 
 def _norm_artist(s: str) -> str:
     s = s.strip().lower()
@@ -68,6 +89,11 @@ def _http_get_json(
     r = requests.get(url, headers=headers, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json()
+
+
+# ----------------------------
+#       MusicBrainz
+# ----------------------------
 
 
 def _mb_search_recordings(
@@ -234,6 +260,11 @@ def _musicbrainz_first_year(
     return min(candidate_years) if candidate_years else None
 
 
+# ----------------------------
+#           Discogs
+# ----------------------------
+
+
 def _discogs_release_has_track(release_json: dict, want_title_norm: str) -> bool:
     tracklist = release_json.get("tracklist") or []
     for tr in tracklist:
@@ -249,14 +280,12 @@ def _discogs_release_has_track(release_json: dict, want_title_norm: str) -> bool
 
 def _discogs_release_is_bad(release_json: dict) -> bool:
     # Skip unofficial; prefer avoiding compilations when possible
-    if (release_json.get("status") or "").lower() == "unofficial":
+    if (release_json.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
         return True
 
-    formats = release_json.get("formats") or []
+    formats = release_json.get("format") or []
     for f in formats:
-        desc = " ".join((f.get("descriptions") or [])).lower()
-        name = (f.get("name") or "").lower()
-        if "unofficial" in desc or "unofficial" in name:
+        if f.lower() in _BAD_SECONDARY_TYPES:
             return True
     return False
 
@@ -276,6 +305,14 @@ def _discogs_release_artist_match(release_json: dict, want_artist_norm: str) -> 
     )
 
 
+def _discogs_release_is_compilation(rel: dict) -> bool:
+    for f in rel.get("formats") or []:
+        desc = " ".join((f.get("descriptions") or [])).lower()
+        if "compilation" in desc:
+            return True
+    return False
+
+
 def _discogs_search(
     song_title: str,
     artist: str,
@@ -292,7 +329,7 @@ def _discogs_search(
     params = {
         "type": "master" if rec_type == "album" else "release",
         "artist": artist,
-        "track": song_title,
+        "q": song_title,
         "per_page": per_page,
         "page": 1,
     }
@@ -307,60 +344,81 @@ def _discogs_first_year(
     want_artist_norm = _norm_artist(artist)
 
     results = _discogs_search(
-        song_title, artist, user_agent, discogs_token, per_page=10
+        song_title, artist, user_agent, discogs_token, per_page=25, rec_type="single"
     )
-    if not results:
-        results = _discogs_search(
-            song_title, artist, user_agent, discogs_token, per_page=10, rec_type="album"
-        )
-        if not results:
-            return None
 
     years_good: List[int] = []
     years_compilation: List[int] = []
 
-    headers = {"User-Agent": user_agent}
+    '''headers = {"User-Agent": user_agent}
     if discogs_token:
-        headers["Authorization"] = f"Discogs token={discogs_token}"
+        headers["Authorization"] = f"Discogs token={discogs_token}" '''
 
     # Inspect a handful of the best-looking results
     for item in results[:len(results)]:
+        if _discogs_release_is_bad(item):
+            continue
+
+        '''if not _discogs_release_artist_match(item, want_artist_norm):
+            continue
+
+        if not _discogs_release_has_track(item, want_title_norm):
+            continue
+'''
         year_str = item.get("year")
-        if not year_str :
+        if not year_str:
             continue
         year = _extract_year(str(year_str))
         if not year:
             continue
-        years_good.append(year)
-        # Rate limiting / politeness
-    """ time.sleep(1.0)
-
-
-        if _discogs_release_is_bad(rel):
-            continue
-
-        if not _discogs_release_artist_match(rel, want_artist_norm):
-            continue
-
-        if not _discogs_release_has_track(rel, want_title_norm):
-            continue
-
-        y = rel.get("year")
-        if not isinstance(y, int) or y <= 0:
-            continue
 
         # Prefer non-compilation if possible
-        formats = rel.get("formats") or []
+        formats = item.get("formats") or []
         is_comp = any(
             "compilation" in " ".join((f.get("descriptions") or [])).lower()
             for f in formats
         )
 
         if is_comp:
-            years_compilation.append(y)
+            years_compilation.append(year)
         else: 
-            
-    """
+            years_good.append(year)
+
+    if not years_good and not years_compilation:
+        results = _discogs_search(
+            song_title, artist, user_agent, discogs_token, per_page=25, rec_type="album"
+        )
+        if not results:
+            return None
+        
+    for item in results[: len(results)]:
+        if _discogs_release_is_bad(item):
+            continue
+
+        """if not _discogs_release_artist_match(item, want_artist_norm):
+            continue
+
+        if not _discogs_release_has_track(item, want_title_norm):
+            continue """
+
+        year_str = item.get("year")
+        if not year_str:
+            continue
+        year = _extract_year(str(year_str))
+        if not year:
+            continue
+
+        # Prefer non-compilation if possible
+        formats = item.get("formats") or []
+        is_comp = any(
+            "compilation" in " ".join((f.get("descriptions") or [])).lower()
+            for f in formats
+        )
+
+        if is_comp:
+            years_compilation.append(year)
+        else:
+            years_good.append(year)
 
     if years_good:
         return min(years_good)
@@ -368,6 +426,10 @@ def _discogs_first_year(
         return min(years_compilation)
     return None
 
+
+# ----------------------------
+#       Public function
+# ----------------------------
 
 def first_release_year(
     song_title: str, artist: str, *, discogs_token: Optional[str] = None
@@ -387,10 +449,10 @@ def first_release_year(
     mb_year = None
     dc_year = None
 
-    """try:
+    try:
         mb_year = _musicbrainz_first_year(song_title, artist, user_agent=user_agent)
     except requests.RequestException:
-        mb_year = None """
+        mb_year = None 
 
     try:
         dc_year = _discogs_first_year(
