@@ -1,21 +1,20 @@
 from __future__ import annotations
 
-import re
-import time
-from typing import Optional, List, Tuple, Dict, Any
-import requests
 import os
+import re
+import threading
+import tkinter as tk
+from tkinter import messagebox, ttk
+from typing import List, Optional
+
+import requests
 
 
 _MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
-token = os.environ.get("DISCOGS_TOKEN")  # export DISCOGS_TOKEN=...
+_DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
+_USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 
-# ------------------------------------
-# Normalization / filtering helpers
-# ------------------------------------
-
-# Keywords that often indicate non-original / non-studio / non-canonical variants
 _BAD_VERSION_RE = re.compile(
     r"""
     \b(
@@ -28,12 +27,7 @@ _BAD_VERSION_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Some common “noise” tokens to strip from titles for robust matching
-_TITLE_NOISE_RE = re.compile(
-    r"\s*[\(\[\{].*?[\)\]\}]\s*"
-)  # remove (...) / [...] / {...} parts
-
-# Secondary types to avoid when looking for "first release"
+_TITLE_NOISE_RE = re.compile(r"\s*[\(\[\{].*?[\)\]\}]\s*")
 _BAD_SECONDARY_TYPES = {
     "compilation",
     "live",
@@ -48,25 +42,26 @@ _BAD_SECONDARY_TYPES = {
     "audio drama",
     "spokenword",
     "field recording",
-    "unofficial"
+    "unofficial",
 }
 
-def _norm_artist(s: str) -> str:
-    s = s.strip().lower()
-    s = re.sub(r"^the\s+", "", s)  # treat "The Beach Boys" ~ "Beach Boys"
-    s = re.sub(r"[^\w\s]", "", s)  # drop punctuation
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+
+def _norm_artist(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"^the\s+", "", value)
+    value = re.sub(r"[^\w\s]", "", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
-def _norm_title(s: str) -> str:
-    s = s.strip().lower()
-    s = _TITLE_NOISE_RE.sub(" ", s)  # drop parenthetical qualifiers
-    s = s.replace("&", "and")
-    s = re.sub(r"[’']", "", s)  # normalize apostrophes away (I'm -> Im)
-    s = re.sub(r"[^\w\s]", " ", s)  # punctuation -> space (What's Up? -> Whats Up)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+def _norm_title(value: str) -> str:
+    value = value.strip().lower()
+    value = _TITLE_NOISE_RE.sub(" ", value)
+    value = value.replace("&", "and")
+    value = re.sub(r"[’']", "", value)
+    value = re.sub(r"[^\w\s]", " ", value)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def _looks_like_bad_version(text: str) -> bool:
@@ -76,407 +71,299 @@ def _looks_like_bad_version(text: str) -> bool:
 def _extract_year(date_str: str) -> Optional[int]:
     if not date_str:
         return None
-    m = re.match(r"^\s*(\d{4})", date_str)
-    if not m:
+    match = re.match(r"^\s*(\d{4})", str(date_str))
+    if not match:
         return None
-    y = int(m.group(1))
-    return y if 1900 <= y <= 2100 else None
+    year = int(match.group(1))
+    return year if 1900 <= year <= 2100 else None
 
 
 def _http_get_json(
-    url: str, *, headers: dict, params: dict | None = None, timeout: int = 25
+    url: str,
+    *,
+    headers: dict,
+    params: Optional[dict] = None,
+    timeout: int = 25,
 ) -> dict:
-    r = requests.get(url, headers=headers, params=params, timeout=timeout)
-    r.raise_for_status()
-    return r.json()
+    response = requests.get(url, headers=headers, params=params, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
-# ----------------------------
-#       MusicBrainz
-# ----------------------------
-
-
-def _mb_search_recordings(
-    song_title: str, artist: str, user_agent: str, limit: int = 25, rec_type: str = "single"
+def _mb_search_releases(
+    song_title: str,
+    artist: str,
+    scan_for: str,
+    limit: int = 25,
 ) -> List[dict]:
-    headers = {"User-Agent": user_agent}
-    if rec_type == "album":
-        query = f'recording:"{song_title}" AND artist:"{artist}" AND NOT disambiguation:live AND NOT title:live'
-        url = f"{_MB_BASE}/recording"
-    else:
-        query = f'recording:"{song_title}" AND artist:"{artist}" AND status:"official" AND type:"single"'
-        url = f"{_MB_BASE}/release"
+    headers = {"User-Agent": _USER_AGENT}
+    release_type = "album" if scan_for == "album" else "single"
+    query = (
+        f'release:"{song_title}" AND artist:"{artist}" AND status:"official" '
+        f'AND primarytype:"{release_type}"'
+    )
     params = {"query": query, "fmt": "json", "limit": limit}
-    data = _http_get_json(url, headers=headers, params=params)
-    if rec_type == "album":
-        return data.get("recordings") or []
-    else:
-        return data.get("releases") or []
+    data = _http_get_json(f"{_MB_BASE}/release", headers=headers, params=params)
+    return data.get("releases") or []
 
 
-def _mb_artist_credit_str(rec: dict) -> str:
-    # MusicBrainz returns artist-credit as list of {artist:{name}, name, joinphrase}
+def _mb_release_artist_str(release: dict) -> str:
     parts = []
-    for ac in rec.get("artist-credit") or []:
-        name = ac.get("name") or (ac.get("artist") or {}).get("name") or ""
-        join = ac.get("joinphrase") or ""
-        parts.append(f"{name}{join}")
+    for credit in release.get("artist-credit") or []:
+        name = credit.get("name") or (credit.get("artist") or {}).get("name") or ""
+        join_phrase = credit.get("joinphrase") or ""
+        parts.append(f"{name}{join_phrase}")
     return "".join(parts).strip()
 
 
-def _mb_recording_quality_score(
-    rec: dict, want_title_norm: str, want_artist_norm: str
+def _mb_release_quality_score(
+    release: dict,
+    want_title_norm: str,
+    want_artist_norm: str,
 ) -> int:
-    """
-    Higher is better. We use this to pick the best candidate recordings
-    before doing heavier detail fetches.
-    """
-    score = int(rec.get("score", 0))  # 0..100 from MB search
+    score = int(release.get("score", 0))
+    title_norm = _norm_title(release.get("title") or "")
+    artist_norm = _norm_artist(_mb_release_artist_str(release))
 
-    title = rec.get("title") or ""
-    title_norm = _norm_title(title)
-
-    ac_str = _mb_artist_credit_str(rec)
-    ac_norm = _norm_artist(ac_str)
-
-    # Strong preference for normalized exact title match
     if title_norm == want_title_norm:
         score += 40
     elif want_title_norm in title_norm or title_norm in want_title_norm:
         score += 15
 
-    # Strong preference for normalized artist match
-    if ac_norm == want_artist_norm:
+    if artist_norm == want_artist_norm:
         score += 40
-    elif want_artist_norm in ac_norm or ac_norm in want_artist_norm:
+    elif want_artist_norm in artist_norm or artist_norm in want_artist_norm:
         score += 15
 
-    # Penalize likely variants
-    if _looks_like_bad_version(title) or _looks_like_bad_version(
-        rec.get("disambiguation", "")
-    ):
+    if _looks_like_bad_version(release.get("title", "")):
         score -= 60
-
-    # Slight preference if releases already present in search payload
-    if rec.get("releases"):
-        score += 5
 
     return score
 
 
-def _mb_fetch_recording_years(recording_id: str, user_agent: str) -> List[int]:
-    """
-    Fetch recording details and return plausible original release years.
-    Filters:
-      - Prefer releases with status=Official when available
-      - Avoid obviously bad versions via disambiguation in release title
-    """
-    headers = {"User-Agent": user_agent}
-    url = f"{_MB_BASE}/recording/{recording_id}"
-    params = {
-        "fmt": "json",
-        "inc": "artists+releases",  # keep it light; still useful
-    }
+def _musicbrainz_first_year(song_title: str, artist: str, scan_for: str) -> Optional[int]:
+    releases = _mb_search_releases(song_title, artist, scan_for=scan_for)
+    if not releases:
+        return None
 
-    # Be polite to MB rate limiting
-    time.sleep(1.05)
-    rec = _http_get_json(url, headers=headers, params=params)
-
-    years_all: List[int] = []
-    years_official: List[int] = []
-
-    for rel in rec.get("releases") or []:
-        y = _extract_year(rel.get("date") or "")
-        if not y:
-            continue
-
-        rel_title = rel.get("title") or ""
-        if _looks_like_bad_version(rel_title):
-            continue
-
-        years_all.append(y)
-        if (rel.get("status") or "").lower() == "official":
-            years_official.append(y)
-
-    # Prefer official years if we have any; otherwise fall back
-    return sorted(set(years_official or years_all))
-
-
-def _musicbrainz_first_year(
-    song_title: str, artist: str, user_agent: str
-) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
-    rec_type = "single"
-    recs = _mb_search_recordings(song_title, artist, user_agent=user_agent, limit=25)
-    if not recs:
-        rec_type = "album"
-        recs = _mb_search_recordings(
-            song_title, artist, user_agent=user_agent, limit=25, type="album"
-        )
-        if not recs:
-            return None
-
-    # Rank candidates (cheap) and then fetch details for best few (expensive)
     ranked = sorted(
-        recs,
-        key=lambda r: _mb_recording_quality_score(r, want_title_norm, want_artist_norm),
+        releases,
+        key=lambda release: _mb_release_quality_score(
+            release, want_title_norm, want_artist_norm
+        ),
         reverse=True,
     )
 
-    candidate_years: List[int] = []
-
-    # Try all candidates; stop early if we get a very plausible early year
-    for rec in ranked[:(len(ranked))]: 
-        rid = rec.get("id")
-        if not rid:
+    years: List[int] = []
+    for release in ranked:
+        artist_norm = _norm_artist(_mb_release_artist_str(release))
+        if artist_norm and want_artist_norm not in artist_norm and artist_norm not in want_artist_norm:
             continue
+        year = _extract_year(release.get("date"))
+        if year:
+            years.append(year)
 
-        title = rec.get("title") or ""
-        if _looks_like_bad_version(title) or _looks_like_bad_version(
-            rec.get("disambiguation", "")
-        ):
-            continue
-
-        # Ensure artist-credit isn't wildly off
-        ac_norm = _norm_artist(_mb_artist_credit_str(rec))
-        if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
-            continue
-
-        #  years = _mb_fetch_recording_years(rid, user_agent=user_agent)
-        if rec_type == "album":
-            year = _extract_year(rec.get("first-release-date") or "")
-        else:
-            year = _extract_year(rec.get("date") or "")
-        if not year:
-            continue
-        candidate_years.append(year)
-
-        # If we found something, we can keep going a bit for even earlier,
-        # but avoid too many calls.
-        # if candidate_years:
-        #    break
-
-    return min(candidate_years) if candidate_years else None
-
-
-# ----------------------------
-#           Discogs
-# ----------------------------
-
-
-def _discogs_release_has_track(release_json: dict, want_title_norm: str) -> bool:
-    tracklist = release_json.get("tracklist") or []
-    for tr in tracklist:
-        t = tr.get("title") or ""
-        if not t:
-            continue
-        if _looks_like_bad_version(t):
-            continue
-        if _norm_title(t) == want_title_norm:
-            return True
-    return False
-
-
-def _discogs_release_is_bad(release_json: dict) -> bool:
-    # Skip unofficial; prefer avoiding compilations when possible
-    if (release_json.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
-        return True
-
-    formats = release_json.get("format") or []
-    for f in formats:
-        if f.lower() in _BAD_SECONDARY_TYPES:
-            return True
-    return False
-
-
-def _discogs_release_artist_match(release_json: dict, want_artist_norm: str) -> bool:
-    artists = release_json.get("artists") or []
-    # Some releases use "Various"; treat as mismatch
-    names = [_norm_artist(a.get("name", "")) for a in artists if a.get("name")]
-    if not names:
-        return False
-    if any(n == "various" for n in names):
-        return False
-    # Accept if any main artist matches loosely
-    return any(
-        n == want_artist_norm or want_artist_norm in n or n in want_artist_norm
-        for n in names
-    )
-
-
-def _discogs_release_is_compilation(rel: dict) -> bool:
-    for f in rel.get("formats") or []:
-        desc = " ".join((f.get("descriptions") or [])).lower()
-        if "compilation" in desc:
-            return True
-    return False
+    return min(years) if years else None
 
 
 def _discogs_search(
     song_title: str,
     artist: str,
-    user_agent: str,
-    token: Optional[str],
-    per_page: int = 8,
-    rec_type: str = "single",
+    scan_for: str,
+    per_page: int = 25,
 ) -> List[dict]:
-    headers = {"User-Agent": user_agent}
-    if token:
-        headers["Authorization"] = f"Discogs token={token}"
+    headers = {"User-Agent": _USER_AGENT}
+    if _DISCOGS_TOKEN:
+        headers["Authorization"] = f"Discogs token={_DISCOGS_TOKEN}"
 
-    url = f"{_DISCOGS_BASE}/database/search"
     params = {
-        "type": "master" if rec_type == "album" else "release",
+        "type": "master" if scan_for == "album" else "release",
         "artist": artist,
+        "track": song_title if scan_for == "single" else None,
+        "release_title": song_title if scan_for == "album" else None,
         "q": song_title,
         "per_page": per_page,
         "page": 1,
     }
-    data = _http_get_json(url, headers=headers, params=params)
+    params = {key: value for key, value in params.items() if value is not None}
+    data = _http_get_json(f"{_DISCOGS_BASE}/database/search", headers=headers, params=params)
     return data.get("results") or []
 
 
-def _discogs_first_year(
-    song_title: str, artist: str, user_agent: str, discogs_token: Optional[str]
-) -> Optional[int]:
+def _discogs_release_is_bad(release: dict) -> bool:
+    if (release.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
+        return True
+    for fmt in release.get("format") or []:
+        if str(fmt).lower() in _BAD_SECONDARY_TYPES:
+            return True
+    return False
+
+
+def _discogs_first_year(song_title: str, artist: str, scan_for: str) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
+    results = _discogs_search(song_title, artist, scan_for=scan_for)
 
-    results = _discogs_search(
-        song_title, artist, user_agent, discogs_token, per_page=25, rec_type="single"
-    )
-
-    years_good: List[int] = []
-    years_compilation: List[int] = []
-
-    '''headers = {"User-Agent": user_agent}
-    if discogs_token:
-        headers["Authorization"] = f"Discogs token={discogs_token}" '''
-
-    # Inspect a handful of the best-looking results
-    for item in results[:len(results)]:
+    years: List[int] = []
+    for item in results:
         if _discogs_release_is_bad(item):
             continue
 
-        '''if not _discogs_release_artist_match(item, want_artist_norm):
+        title_norm = _norm_title(item.get("title") or "")
+        if want_title_norm not in title_norm and title_norm not in want_title_norm:
             continue
 
-        if not _discogs_release_has_track(item, want_title_norm):
-            continue
-'''
-        year_str = item.get("year")
-        if not year_str:
-            continue
-        year = _extract_year(str(year_str))
-        if not year:
+        artist_name = item.get("artist") or ""
+        artist_norm = _norm_artist(artist_name)
+        if artist_norm and want_artist_norm not in artist_norm and artist_norm not in want_artist_norm:
             continue
 
-        # Prefer non-compilation if possible
-        formats = item.get("formats") or []
-        is_comp = any(
-            "compilation" in " ".join((f.get("descriptions") or [])).lower()
-            for f in formats
-        )
+        year = _extract_year(item.get("year"))
+        if year:
+            years.append(year)
 
-        if is_comp:
-            years_compilation.append(year)
-        else: 
-            years_good.append(year)
-
-    if not years_good and not years_compilation:
-        results = _discogs_search(
-            song_title, artist, user_agent, discogs_token, per_page=25, rec_type="album"
-        )
-        if not results:
-            return None
-        
-    for item in results[: len(results)]:
-        if _discogs_release_is_bad(item):
-            continue
-
-        """if not _discogs_release_artist_match(item, want_artist_norm):
-            continue
-
-        if not _discogs_release_has_track(item, want_title_norm):
-            continue """
-
-        year_str = item.get("year")
-        if not year_str:
-            continue
-        year = _extract_year(str(year_str))
-        if not year:
-            continue
-
-        # Prefer non-compilation if possible
-        formats = item.get("formats") or []
-        is_comp = any(
-            "compilation" in " ".join((f.get("descriptions") or [])).lower()
-            for f in formats
-        )
-
-        if is_comp:
-            years_compilation.append(year)
-        else:
-            years_good.append(year)
-
-    if years_good:
-        return min(years_good)
-    if years_compilation:
-        return min(years_compilation)
-    return None
+    return min(years) if years else None
 
 
-# ----------------------------
-#       Public function
-# ----------------------------
-
-def first_release_year(
-    song_title: str, artist: str, *, discogs_token: Optional[str] = None
-) -> Optional[int]:
-    """
-    Returns earliest plausible release year found across MusicBrainz + Discogs, with heuristics
-    to reduce false positives (covers/live/remasters/etc.). Returns None if not found.
-
-    Requirements:
-      pip install requests
-
-    Discogs:
-      Pass discogs_token for best reliability.
-    """
-    user_agent = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
-
+def first_release_year(artist: str, song_title: str, scan_for: str = "single") -> Optional[int]:
     mb_year = None
     dc_year = None
 
     try:
-        mb_year = _musicbrainz_first_year(song_title, artist, user_agent=user_agent)
+        mb_year = _musicbrainz_first_year(song_title, artist, scan_for=scan_for)
     except requests.RequestException:
-        mb_year = None 
+        mb_year = None
 
     try:
-        dc_year = _discogs_first_year(
-            song_title, artist, user_agent=user_agent, discogs_token=discogs_token
-        )
+        dc_year = _discogs_first_year(song_title, artist, scan_for=scan_for)
     except requests.RequestException:
         dc_year = None
 
-    years = [y for y in (mb_year, dc_year) if isinstance(y, int)]
+    years = [year for year in (mb_year, dc_year) if isinstance(year, int)]
     return min(years) if years else None
 
 
-if __name__ == "__main__":
-    # Your known-good examples (expected “true” year)
-    tests = [
-        ("Moonchild", "King Crimson", 1969),
-        ("I'm Not In Love", "10cc", 1975),
-        ("What's Up?", "4 Non Blondes", 1993),
-        ("No Time To Die", "Billie Eilish", 2020),
-        ("Surfin' U.S.A.", "The Beach Boys", 1963),
-    ]
+class ReleaseYearApp:
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.root.title("Original Release Year")
+        self.root.resizable(False, False)
 
-    for title, art, expected in tests:
-        got = first_release_year(
-            title, art, discogs_token=token
-        )  # add token for best results
-        print(f"{art} — {title} | expected {expected} | got {got}")
+        self.scan_for = tk.StringVar(value="single")
+        self.artist_var = tk.StringVar()
+        self.title_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="Ready")
+        self.result_var = tk.StringVar(value="Enter an artist and title to start.")
+
+        self._build_menu()
+        self._build_layout()
+
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self.root)
+        scan_menu = tk.Menu(menu_bar, tearoff=False)
+        scan_menu.add_radiobutton(
+            label="Singles",
+            variable=self.scan_for,
+            value="single",
+            command=self._update_mode_label,
+        )
+        scan_menu.add_radiobutton(
+            label="Albums",
+            variable=self.scan_for,
+            value="album",
+            command=self._update_mode_label,
+        )
+        menu_bar.add_cascade(label="Scan for", menu=scan_menu)
+        self.root.config(menu=menu_bar)
+
+    def _build_layout(self) -> None:
+        frame = ttk.Frame(self.root, padding=16)
+        frame.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        artist_entry = ttk.Entry(frame, textvariable=self.artist_var, width=38)
+        artist_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        ttk.Label(frame, text="Title").grid(row=2, column=0, sticky="w", pady=(0, 6))
+        title_entry = ttk.Entry(frame, textvariable=self.title_var, width=38)
+        title_entry.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+        self.mode_label = ttk.Label(frame, text="Current mode: Singles")
+        self.mode_label.grid(row=4, column=0, sticky="w", pady=(0, 10))
+
+        self.lookup_button = ttk.Button(frame, text="Find original year", command=self.lookup_year)
+        self.lookup_button.grid(row=5, column=0, sticky="ew", pady=(0, 12))
+
+        ttk.Label(frame, textvariable=self.result_var, wraplength=300).grid(
+            row=6, column=0, sticky="w", pady=(0, 8)
+        )
+        ttk.Label(frame, textvariable=self.status_var, foreground="#555555").grid(
+            row=7, column=0, sticky="w"
+        )
+
+        artist_entry.focus()
+        self.root.bind("<Return>", lambda _event: self.lookup_year())
+
+    def _update_mode_label(self) -> None:
+        label = "Albums" if self.scan_for.get() == "album" else "Singles"
+        self.mode_label.config(text=f"Current mode: {label}")
+
+    def lookup_year(self) -> None:
+        artist = self.artist_var.get().strip()
+        title = self.title_var.get().strip()
+
+        if not artist or not title:
+            messagebox.showerror("Missing data", "Please enter both artist and title.")
+            return
+
+        self.lookup_button.config(state="disabled")
+        self.status_var.set("Searching MusicBrainz and Discogs...")
+        self.result_var.set("Working...")
+
+        worker = threading.Thread(
+            target=self._lookup_year_worker,
+            args=(artist, title, self.scan_for.get()),
+            daemon=True,
+        )
+        worker.start()
+
+    def _lookup_year_worker(self, artist: str, title: str, scan_for: str) -> None:
+        try:
+            year = first_release_year(artist, title, scan_for=scan_for)
+            self.root.after(0, lambda: self._handle_lookup_success(artist, title, scan_for, year))
+        except Exception as exc:
+            self.root.after(0, lambda: self._handle_lookup_error(str(exc)))
+
+    def _handle_lookup_success(
+        self,
+        artist: str,
+        title: str,
+        scan_for: str,
+        year: Optional[int],
+    ) -> None:
+        mode_label = "album" if scan_for == "album" else "single"
+        if year is None:
+            self.result_var.set(f'No original {mode_label} year found for "{title}" by {artist}.')
+        else:
+            self.result_var.set(
+                f'The earliest {mode_label} year for "{title}" by {artist} is {year}.'
+            )
+        self.status_var.set("Finished")
+        self.lookup_button.config(state="normal")
+
+    def _handle_lookup_error(self, error_message: str) -> None:
+        self.result_var.set("Lookup failed.")
+        self.status_var.set(error_message or "An unexpected error occurred.")
+        self.lookup_button.config(state="normal")
+
+
+def main() -> None:
+    root = tk.Tk()
+    ReleaseYearApp(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
