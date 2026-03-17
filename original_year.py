@@ -4,8 +4,9 @@ import os
 import re
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, ttk, filedialog
 from typing import List, Optional
+from mediafile import MediaFile
 
 import requests
 
@@ -14,6 +15,7 @@ _MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
 _DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+_AUDIO_FILES = ("mp3", "flac", "wav", "aac", "ogg", "m4a", "opus", "alac", "aiff", "dsd", "pcm")
 
 _BAD_VERSION_RE = re.compile(
     r"""
@@ -251,7 +253,7 @@ class ReleaseYearApp:
         self.root.title("Original Release Year")
         self.root.resizable(False, False)
 
-        self.scan_for = tk.StringVar(value="single")
+        self.selection = tk.StringVar(value="single")
         self.artist_var = tk.StringVar()
         self.title_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
@@ -262,20 +264,26 @@ class ReleaseYearApp:
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self.root)
-        scan_menu = tk.Menu(menu_bar, tearoff=False)
-        scan_menu.add_radiobutton(
+        mode_menu = tk.Menu(menu_bar, tearoff=False)
+        mode_menu.add_radiobutton(
             label="Singles",
-            variable=self.scan_for,
+            variable=self.selection,
             value="single",
             command=self._update_mode_label,
         )
-        scan_menu.add_radiobutton(
+        mode_menu.add_radiobutton(
             label="Albums",
-            variable=self.scan_for,
+            variable=self.selection,
             value="album",
             command=self._update_mode_label,
         )
-        menu_bar.add_cascade(label="Scan for", menu=scan_menu)
+        menu_bar.add_cascade(label="Mode", menu=mode_menu)
+
+        select_menu = tk.Menu(menu_bar, tearoff=False)
+        select_menu.add_command(label="File", command=self.open_file)
+        select_menu.add_command(label="Folder",command=self.open_folder)
+        menu_bar.add_cascade(label="Open", menu=select_menu)
+
         self.root.config(menu=menu_bar)
 
     def _build_layout(self) -> None:
@@ -307,8 +315,62 @@ class ReleaseYearApp:
         self.root.bind("<Return>", lambda _event: self.lookup_year())
 
     def _update_mode_label(self) -> None:
-        label = "Albums" if self.scan_for.get() == "album" else "Singles"
+        label = "Albums" if self.selection.get() == "album" else "Singles"
         self.mode_label.config(text=f"Current mode: {label}")
+
+    def get_basic_metadata(self, file_path):
+        song_title = os.path.basename(file_path)
+        artist = "Unknown Artist"
+        album = "Unknown Album"
+        try:
+            file = MediaFile(file_path)
+            if file is None:
+                self.status_var.showMessage(
+                    f"Could not read audio file: {file_path}. Make sure the file exists."
+                )
+                return None
+
+            # Get basic metadata
+            song_title = file.title
+            artist = file.artist
+            album = file.album
+
+        except Exception as e:
+            self.status_var.showMessage(
+                f"Error extracting metadata from {file_path}: {str(e)}"
+            )
+
+        #        self.status_var.showMessage(f"{artist} - {song_title} ({album})")
+        return artist, song_title, album
+
+    def open_file(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Choose File to Open",
+            filetypes=[("Audio Files", _AUDIO_FILES)],
+        )
+        if file_path:
+            extension = file_path.split('.')[-1].casefold()
+            if extension in _AUDIO_FILES:
+                self.status_var.set(f"Selected file: {file_path}")
+                metadata = self.get_basic_metadata(file_path)
+                if metadata:
+                    artist, song_title, _ = metadata
+                    self.artist_var.set(artist)
+                    self.title_var.set(song_title)
+                    self._lookup_year_worker(
+                        artist, song_title, scan_for=self.selection.get()
+                    )
+        else:
+            self.status_var.set("No file selected.")
+
+    def open_folder(self) -> None:
+        directory = filedialog.askdirectory(
+            title="Choose Folder to Open", mustexist=True
+        )
+        if directory == "":
+            directory = None
+            self.__root.title("Fix'em")
+            return
 
     def lookup_year(self) -> None:
         artist = self.artist_var.get().strip()
@@ -329,7 +391,9 @@ class ReleaseYearApp:
         )
         worker.start()
 
-    def _lookup_year_worker(self, artist: str, title: str, scan_for: str) -> None:
+    def _lookup_year_worker(
+        self, artist: str, title: str, scan_for: str = "single"
+    ) -> None:
         try:
             year = first_release_year(artist, title, scan_for=scan_for)
             self.root.after(0, lambda: self._handle_lookup_success(artist, title, scan_for, year))
