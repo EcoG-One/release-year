@@ -17,6 +17,13 @@ _DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _AUDIO_FILES = ("mp3", "flac", "wav", "aac", "ogg", "m4a", "opus", "alac", "aiff", "dsd", "pcm")
 
+
+# ------------------------------------
+# Normalization / filtering helpers
+# ------------------------------------
+
+# Keywords that often indicate non-original / non-studio / non-canonical variants
+
 _BAD_VERSION_RE = re.compile(
     r"""
     \b(
@@ -29,7 +36,12 @@ _BAD_VERSION_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-_TITLE_NOISE_RE = re.compile(r"\s*[\(\[\{].*?[\)\]\}]\s*")
+# Some common “noise” tokens to strip from titles for robust matching
+_TITLE_NOISE_RE = re.compile(
+    r"\s*[\(\[\{].*?[\)\]\}]\s*"
+)  # remove (...) / [...] / {...} parts
+
+# Secondary types to avoid when looking for "first release"
 _BAD_SECONDARY_TYPES = {
     "compilation",
     "live",
@@ -50,18 +62,20 @@ _BAD_SECONDARY_TYPES = {
 
 def _norm_artist(value: str) -> str:
     value = value.strip().lower()
-    value = re.sub(r"^the\s+", "", value)
-    value = re.sub(r"[^\w\s]", "", value)
+    value = re.sub(r"^the\s+", "", value)  # treat "The Beach Boys" ~ "Beach Boys"
+    value = re.sub(r"[^\w\s]", "", value)  # drop punctuation
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
 
 def _norm_title(value: str) -> str:
     value = value.strip().lower()
-    value = _TITLE_NOISE_RE.sub(" ", value)
+    value = _TITLE_NOISE_RE.sub(" ", value)  # drop parenthetical qualifiers
     value = value.replace("&", "and")
-    value = re.sub(r"[’']", "", value)
-    value = re.sub(r"[^\w\s]", " ", value)
+    value = re.sub(r"[’']", "", value)  # normalize apostrophes away (I'm -> Im)
+    value = re.sub(
+        r"[^\w\s]", " ", value
+    )  # punctuation -> space (What's Up? -> Whats Up)
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
@@ -92,6 +106,11 @@ def _http_get_json(
     return response.json()
 
 
+# ----------------------------
+#       MusicBrainz
+# ----------------------------
+
+
 def _mb_search_releases(
     song_title: str,
     artist: str,
@@ -101,7 +120,7 @@ def _mb_search_releases(
     headers = {"User-Agent": _USER_AGENT}
     release_type = "album" if file_mode == "album" else "single"
     query = (
-        f'release:"{song_title}" AND artist:"{artist}" AND status:"official" '
+        f'release:"{_norm_title(song_title)}" AND artist:"{_norm_artist(artist)}" AND status:"official" '
         f'AND primarytype:"{release_type}"'
     )
     params = {"query": query, "fmt": "json", "limit": limit}
@@ -206,16 +225,17 @@ def _discogs_release_is_bad(release: dict) -> bool:
 def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
-    results = _discogs_search(song_title, artist, file_mode=file_mode)
+    results = _discogs_search(want_title_norm, want_artist_norm, file_mode=file_mode)
 
     years: List[int] = []
     for item in results:
         if _discogs_release_is_bad(item):
             continue
 
-        title_norm = _norm_title(item.get("title") or "")
-        if want_title_norm not in title_norm and title_norm not in want_title_norm:
-            continue
+        if file_mode == "album":
+            title_norm = _norm_title(item.get("title") or "")
+            if want_title_norm not in title_norm and title_norm not in want_title_norm:
+                continue
 
         artist_name = item.get("artist") or ""
         artist_norm = _norm_artist(artist_name)
@@ -431,7 +451,48 @@ class ReleaseYearApp:
         )
         if directory == "":
             directory = None
-            self.__root.title("Fix'em")
+        if directory:
+            self.status_var.set(f"Selected folder: {directory}")
+            audio_files = []
+            for root, _, files in os.walk(directory):
+                for file in files:
+                    if file.split('.')[-1].casefold() in _AUDIO_FILES:
+                        audio_files.append(os.path.join(root, file))
+            if not audio_files:
+                messagebox.showinfo("No audio files", "No audio files found in the selected folder.")
+                self.status_var.set("Ready")
+                return
+            self.status_var.set(f"Found {len(audio_files)} audio files. Processing...")
+            albums = {}            
+            for file_path in audio_files:
+                metadata = self.get_basic_metadata(file_path)
+                if metadata:
+                    artist, song_title, album = metadata
+                    if album:
+                        if album not in albums:
+                            albums[album] = [(artist, song_title)]
+                        else:
+                            song = (artist, song_title)
+                            albums[album].append(song)
+            if not albums:
+                messagebox.showinfo("No album data", "No album metadata found in the audio files.")
+                self.status_var.set("Ready")
+                return
+            for album in albums:
+                album_data = set()
+                for i in range(len(albums[album])):
+                        song = albums[album][i]
+                        album_data.add(song[0]) # artist
+                if len(album_data) > 1:
+                    self.status_var.set(f"Multiple artists found for album '{album}'. Skipping.")
+                    continue
+                if not album_data:
+                    self.status_var.set(f"No artist data found for album '{album}'. Skipping.")
+                    continue
+                artist = album_data.pop()
+                self._lookup_year_worker(
+                    artist, album, file_mode=self.file_mode.get()
+                )
             return
 
     def lookup_year(self) -> None:
