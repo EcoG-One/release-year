@@ -111,7 +111,7 @@ def _http_get_json(
 # ----------------------------
 
 
-def _mb_search_releases(
+'''def _mb_search_releases(
     song_title: str,
     artist: str,
     file_mode: str,
@@ -125,10 +125,32 @@ def _mb_search_releases(
     )
     params = {"query": query, "fmt": "json", "limit": limit}
     data = _http_get_json(f"{_MB_BASE}/release", headers=headers, params=params)
-    return data.get("releases") or []
+    return data.get("releases") or [] '''
+
+
+def _mb_search_recordings(
+    song_title: str,
+    artist: str,
+    file_mode: str = "single",
+    limit: int = 25,
+) -> List[dict]:
+    headers = {"User-Agent": _USER_AGENT}
+    if file_mode == "album":
+        query = f'recording:"{song_title}" AND artist:"{artist}" AND NOT disambiguation:live AND NOT title:live'
+        url = f"{_MB_BASE}/recording"
+    else:
+        query = f'recording:"{song_title}" AND artist:"{artist}" AND status:"official" AND type:"single"'
+        url = f"{_MB_BASE}/release"
+    params = {"query": query, "fmt": "json", "limit": limit}
+    data = _http_get_json(url, headers=headers, params=params)
+    if file_mode == "album":
+        return data.get("recordings") or []
+    else:
+        return data.get("releases") or []
 
 
 def _mb_release_artist_str(release: dict) -> str:
+    # MusicBrainz returns artist-credit as list of {artist:{name}, name, joinphrase}
     parts = []
     for credit in release.get("artist-credit") or []:
         name = credit.get("name") or (credit.get("artist") or {}).get("name") or ""
@@ -142,28 +164,42 @@ def _mb_release_quality_score(
     want_title_norm: str,
     want_artist_norm: str,
 ) -> int:
-    score = int(release.get("score", 0))
-    title_norm = _norm_title(release.get("title") or "")
+    """
+    Pick the best candidate recordings
+    before doing heavier detail fetches.
+    """
+    score = int(release.get("score", 0))  # 0..100 from MB search
+    title = release.get("title") or ""
+    title_norm = _norm_title(title)
     artist_norm = _norm_artist(_mb_release_artist_str(release))
 
+    # Strong preference for normalized exact title match, but also give some points for partial matches
     if title_norm == want_title_norm:
         score += 40
     elif want_title_norm in title_norm or title_norm in want_title_norm:
         score += 15
 
+    # Strong preference for normalized artist match, but also give some points for partial matches
     if artist_norm == want_artist_norm:
         score += 40
     elif want_artist_norm in artist_norm or artist_norm in want_artist_norm:
         score += 15
 
-    if _looks_like_bad_version(release.get("title", "")):
+    # Penalize likely variants
+    if _looks_like_bad_version(title) or _looks_like_bad_version(
+        release.get("disambiguation", "")
+    ):
         score -= 60
+
+    # Slight preference if releases already present in search payload
+    if release.get("releases"):
+        score += 5
 
     return score
 
 
-def _musicbrainz_first_year(song_title: str, artist: str, file_mode: str) -> Optional[int]:
-    releases = _mb_search_releases(song_title, artist, file_mode=file_mode)
+'''def _musicbrainz_first_year(song_title: str, artist: str, file_mode: str) -> Optional[int]:
+    releases = _mb_search_recordings(song_title, artist, file_mode=file_mode)
     if not releases:
         return None
 
@@ -186,7 +222,69 @@ def _musicbrainz_first_year(song_title: str, artist: str, file_mode: str) -> Opt
         if year:
             years.append(year)
 
-    return min(years) if years else None
+    return min(years) if years else None '''
+
+
+def _musicbrainz_first_year(
+    song_title: str, artist: str, file_mode: str = "single"
+) -> Optional[int]:
+    want_title_norm = _norm_title(song_title)
+    want_artist_norm = _norm_artist(artist)
+    releases = _mb_search_recordings(
+        song_title, artist, limit=25
+    )
+    if not releases:
+        file_mode = "album"
+        releases = _mb_search_recordings(
+            song_title, artist, limit=25, file_mode="album"
+        )
+        if not releases:
+            return None
+
+    # Rank candidates (cheap) and then fetch details for best few (expensive)
+    ranked = sorted(
+        releases,
+        key=lambda r: _mb_release_quality_score(r, want_title_norm, want_artist_norm),
+        reverse=True,
+    )
+
+    candidate_years: List[int] = []
+
+    # Try all candidates in ranked order until we find some with a valid year, and then take the earliest year among those.
+    for release in ranked:
+        rid = release.get("id")
+        if not rid:
+            continue
+
+        title = release.get("title") or ""
+        if _looks_like_bad_version(title) or _looks_like_bad_version(
+            release.get("disambiguation", "")
+        ):
+            continue
+
+        # Ensure artist-credit isn't wildly off
+        artist_norm = _norm_artist(_mb_release_artist_str(release))
+        if (
+            want_artist_norm not in artist_norm
+            and artist_norm not in want_artist_norm
+        ):
+            continue
+     #   if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
+
+        if file_mode == "album":
+            year = _extract_year(release.get("first-release-date") or "")
+        else:
+            year = _extract_year(release.get("date") or "")
+        if not year:
+            continue
+        candidate_years.append(year)
+
+        # If we found something, we can keep going a bit for even earlier,
+        # but avoid too many calls.
+        # if candidate_years:
+        #    break
+
+    return min(candidate_years) if candidate_years else None
 
 
 def _discogs_search(
@@ -481,8 +579,8 @@ class ReleaseYearApp:
             for album in albums:
                 album_data = set()
                 for i in range(len(albums[album])):
-                        song = albums[album][i]
-                        album_data.add(song[0]) # artist
+                    song = albums[album][i]
+                    album_data.add(song[0]) # artist
                 if len(album_data) > 1:
                     self.status_var.set(f"Multiple artists found for album '{album}'. Skipping.")
                     continue
@@ -519,8 +617,9 @@ class ReleaseYearApp:
         try:
             year = first_release_year(artist, title, file_mode=file_mode)
             self.root.after(0, lambda: self._handle_lookup_success(artist, title, file_mode, year))
-        except Exception as exc:
-            self.root.after(0, lambda: self._handle_lookup_error(str(exc)))
+        except Exception as e:
+            error_message = str(e)
+            self.root.after(0, lambda: self._handle_lookup_error(error_message=error_message))
 
     def _handle_lookup_success(
         self,
