@@ -136,10 +136,10 @@ def _mb_search_recordings(
 ) -> List[dict]:
     headers = {"User-Agent": _USER_AGENT}
     if file_mode == "album":
-        query = f'recording:"{song_title}" AND artist:"{artist}" AND NOT disambiguation:live AND NOT title:live'
+        query = f'recording:"{_norm_title(song_title)}" AND artist:"{_norm_artist(artist)}" AND NOT disambiguation:live AND NOT title:live'
         url = f"{_MB_BASE}/recording"
     else:
-        query = f'recording:"{song_title}" AND artist:"{artist}" AND status:"official" AND type:"single"'
+        query = f'recording:"{_norm_title(song_title)}" AND artist:"{_norm_artist(artist)}" AND status:"official" AND type:"single"'
         url = f"{_MB_BASE}/release"
     params = {"query": query, "fmt": "json", "limit": limit}
     data = _http_get_json(url, headers=headers, params=params)
@@ -198,33 +198,6 @@ def _mb_release_quality_score(
     return score
 
 
-'''def _musicbrainz_first_year(song_title: str, artist: str, file_mode: str) -> Optional[int]:
-    releases = _mb_search_recordings(song_title, artist, file_mode=file_mode)
-    if not releases:
-        return None
-
-    want_title_norm = _norm_title(song_title)
-    want_artist_norm = _norm_artist(artist)
-    ranked = sorted(
-        releases,
-        key=lambda release: _mb_release_quality_score(
-            release, want_title_norm, want_artist_norm
-        ),
-        reverse=True,
-    )
-
-    years: List[int] = []
-    for release in ranked:
-        artist_norm = _norm_artist(_mb_release_artist_str(release))
-        if artist_norm and want_artist_norm not in artist_norm and artist_norm not in want_artist_norm:
-            continue
-        year = _extract_year(release.get("date"))
-        if year:
-            years.append(year)
-
-    return min(years) if years else None '''
-
-
 def _musicbrainz_first_year(
     song_title: str, artist: str, file_mode: str = "single"
 ) -> Optional[int]:
@@ -269,7 +242,7 @@ def _musicbrainz_first_year(
             and artist_norm not in want_artist_norm
         ):
             continue
-     #   if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
+        #   if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
 
         if file_mode == "album":
             year = _extract_year(release.get("first-release-date") or "")
@@ -287,6 +260,11 @@ def _musicbrainz_first_year(
     return min(candidate_years) if candidate_years else None
 
 
+# ----------------------------
+#           Discogs
+# ----------------------------
+
+
 def _discogs_search(
     song_title: str,
     artist: str,
@@ -299,10 +277,10 @@ def _discogs_search(
 
     params = {
         "type": "master" if file_mode == "album" else "release",
-        "artist": artist,
-        "track": song_title if file_mode == "single" else None,
-        "release_title": song_title if file_mode == "album" else None,
-        "q": song_title,
+        "artist": _norm_artist(artist),
+        "track": _norm_title(song_title) if file_mode == "single" else None,
+        "release_title": _norm_title(song_title) if file_mode == "album" else None,
+        "q": _norm_title(song_title) if file_mode == "single" else None,
         "per_page": per_page,
         "page": 1,
     }
@@ -312,10 +290,11 @@ def _discogs_search(
 
 
 def _discogs_release_is_bad(release: dict) -> bool:
+    # Skip unofficial; prefer avoiding compilations when possible, but some original releases are compilations so only filter those if explicitly tagged as such via secondary type or status
     if (release.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
         return True
-    for fmt in release.get("format") or []:
-        if str(fmt).lower() in _BAD_SECONDARY_TYPES:
+    for format in release.get("format") or []:
+        if str(format).lower() in _BAD_SECONDARY_TYPES:
             return True
     return False
 
@@ -323,9 +302,10 @@ def _discogs_release_is_bad(release: dict) -> bool:
 def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
-    results = _discogs_search(want_title_norm, want_artist_norm, file_mode=file_mode)
+    results = _discogs_search(song_title, artist, file_mode=file_mode)
 
     years: List[int] = []
+    # Inspect a handful of the best-looking results more closely, and take the earliest year among those that look good
     for item in results:
         if _discogs_release_is_bad(item):
             continue
@@ -341,66 +321,37 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
             continue
 
         year = _extract_year(item.get("year"))
-        if year:
+
+        if not year:
+            continue
+
+        # Prefer non-compilation if possible
+        formats = item.get("formats") or []
+        is_compilation = any(
+            "compilation" in " ".join((f.get("descriptions") or [])).lower()
+            for f in formats
+        )
+
+        if year and not is_compilation:
             years.append(year)
+
+    if file_mode == "single" and not years:
+        _discogs_first_year(song_title, artist, per_page=25, file_mode="album")
 
     return min(years) if years else None
 
 
-def fetch_musicbrainz_year(artist, title):
-    if not artist or not title:
-        return ""
-    query = (
-        f'artist:"{artist}" AND recording:"{title}" AND NOT release-group:compilation'
-    )
-    url = f"{MUSICBRAINZ_RECORDING_URL}?query={quote(query)}&fmt=json&inc=releases"
-    time.sleep(1)  # To respect MusicBrainz rate limiting
-    for attempt in range(2):
-        try:
-            request = Request(url, headers={"User-Agent": MUSICBRAINZ_USER_AGENT})
-            with urlopen(request, timeout=5) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            break
-        except Exception as e:
-            is_reset = (
-                getattr(e, "winerror", None) == 10054
-                or "[WinError 10054]" in str(e)
-            )
-            is_503 = "HTTP Error 503: Service Temporarily Unavailable" in str(e)
-            if (is_reset or is_503) and attempt == 0:
-                print(str(e))
-                print("Retrying MusicBrainz lookup after a short delay...")
-                if is_503:
-                    time.sleep(1)
-                else:
-                    time.sleep(0.5)
-                continue
-            print(f"Warning: MusicBrainz lookup failed for {artist} - {title}: {e}")
-            return ""
-
-    best_year = ""
-    for recording in data.get("recordings", []):
-        release = recording.get("releases", [])
-        if not release:
-            continue
-        release_group = release[0].get("release-group", [])
-        secondary_types = release_group.get("secondary-types", [])
-        for secondary_type in secondary_types:
-            if secondary_type in ["Compilation", "Live", "Remix", "DJ-mix", "Mixtape/Street", "Demo"]:
-                continue
-
-        year = _extract_year(recording.get("first-release-date", ""))
-        if not year:
-            for release in recording.get("releases", []) or []:
-                year = _extract_year(release.get("date", ""))
-                if year:
-                    break
-        if year and (not best_year or year < best_year):
-            best_year = year
-    return best_year
+# ----------------------------
+#       Public function
+# ----------------------------
 
 
 def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional[int]:
+    """
+    Returns earliest plausible release year found across MusicBrainz + Discogs, with heuristics
+    to reduce false positives (covers/live/remasters/etc.). If not found, tries Wikipedia.Returns None if not found.
+
+    """
     mb_year = None
     dc_year = None
 
@@ -416,15 +367,19 @@ def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional
 
     years = [year for year in (mb_year, dc_year) if isinstance(year, int)]
     if years:
-        print(f"Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year})")
+        print(f"{artist} - {song_title}. Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year})")
         return min(years)
     else:
         wikipedia_date = get_song_release_date(song_title.strip(), artist.strip())
         if wikipedia_date:
             min_year = _extract_year(wikipedia_date)
-            return
-        else:
-           return None
+            if min_year:
+                print(
+                    f"{artist} - {song_title}. Found year on Wikipedia: {min_year} (date string: {wikipedia_date})"
+                )
+                return min_year
+            else:
+                return None
 
 
 class ReleaseYearApp:
@@ -576,21 +531,23 @@ class ReleaseYearApp:
                 messagebox.showinfo("No album data", "No album metadata found in the audio files.")
                 self.status_var.set("Ready")
                 return
+            folder_artists = set()
             for album in albums:
-                album_data = set()
-                for i in range(len(albums[album])):
-                    song = albums[album][i]
-                    album_data.add(song[0]) # artist
-                if len(album_data) > 1:
-                    self.status_var.set(f"Multiple artists found for album '{album}'. Skipping.")
-                    continue
-                if not album_data:
-                    self.status_var.set(f"No artist data found for album '{album}'. Skipping.")
-                    continue
-                artist = album_data.pop()
-                self._lookup_year_worker(
-                    artist, album, file_mode=self.file_mode.get()
-                )
+                folder_artists.add(albums[album][0][0]) # collect unique artists
+            if len(folder_artists) > 1:
+                self.status_var.set(f"Multiple artists found")
+                for album in albums:
+                    artist = albums[album][0][0]
+                    song_title = albums[album][0][1]
+                    self._lookup_year_worker(
+                artist, song_title, file_mode="single")                
+            if not folder_artists:
+                self.status_var.set(f"No artist data found for album '{album}'. Skipping.")
+                return
+            artist = folder_artists.pop()
+            self._lookup_year_worker(
+                artist, album, file_mode=self.file_mode.get()
+            )
             return
 
     def lookup_year(self) -> None:
