@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from logging import root
 import os
 import re
 import threading
@@ -94,6 +95,21 @@ def _extract_year(date_str: str) -> Optional[int]:
     return year if 1900 <= year <= 2100 else None
 
 
+def _coerce_media_year(value: object) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value if 1900 <= value <= 2100 else None
+    if isinstance(value, str):
+        return _extract_year(value)
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            year = _coerce_media_year(item)
+            if year is not None:
+                return year
+    return _extract_year(str(value))
+
+
 def _http_get_json(
     url: str,
     *,
@@ -109,24 +125,6 @@ def _http_get_json(
 # ----------------------------
 #       MusicBrainz
 # ----------------------------
-
-
-'''def _mb_search_releases(
-    song_title: str,
-    artist: str,
-    file_mode: str,
-    limit: int = 25,
-) -> List[dict]:
-    headers = {"User-Agent": _USER_AGENT}
-    release_type = "album" if file_mode == "album" else "single"
-    query = (
-        f'release:"{_norm_title(song_title)}" AND artist:"{_norm_artist(artist)}" AND status:"official" '
-        f'AND primarytype:"{release_type}"'
-    )
-    params = {"query": query, "fmt": "json", "limit": limit}
-    data = _http_get_json(f"{_MB_BASE}/release", headers=headers, params=params)
-    return data.get("releases") or [] '''
-
 
 def _mb_search_recordings(
     song_title: str,
@@ -269,7 +267,6 @@ def _discogs_search(
     song_title: str,
     artist: str,
     file_mode: str,
-    per_page: int = 25,
 ) -> List[dict]:
     headers = {"User-Agent": _USER_AGENT}
     if _DISCOGS_TOKEN:
@@ -281,7 +278,7 @@ def _discogs_search(
         "track": _norm_title(song_title) if file_mode == "single" else None,
         "release_title": _norm_title(song_title) if file_mode == "album" else None,
         "q": _norm_title(song_title) if file_mode == "single" else None,
-        "per_page": per_page,
+        "per_page": 25,
         "page": 1,
     }
     params = {key: value for key, value in params.items() if value is not None}
@@ -290,7 +287,8 @@ def _discogs_search(
 
 
 def _discogs_release_is_bad(release: dict) -> bool:
-    # Skip unofficial; prefer avoiding compilations when possible, but some original releases are compilations so only filter those if explicitly tagged as such via secondary type or status
+    # Skip unofficial; prefer avoiding compilations when possible, but some original releases
+    #  are compilations so only filter those if explicitly tagged as such via secondary type or status
     if (release.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
         return True
     for format in release.get("format") or []:
@@ -305,7 +303,8 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
     results = _discogs_search(song_title, artist, file_mode=file_mode)
 
     years: List[int] = []
-    # Inspect a handful of the best-looking results more closely, and take the earliest year among those that look good
+    # Inspect a handful of the best-looking results more closely, and take
+    #  the earliest year among those that look good
     for item in results:
         if _discogs_release_is_bad(item):
             continue
@@ -336,7 +335,7 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
             years.append(year)
 
     if file_mode == "single" and not years:
-        _discogs_first_year(song_title, artist, per_page=25, file_mode="album")
+        _discogs_first_year(song_title, artist, file_mode="album")
 
     return min(years) if years else None
 
@@ -381,18 +380,22 @@ def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional
             else:
                 return None
 
+# ----------------------------
+#       GUI Application
+# ----------------------------
 
 class ReleaseYearApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Original Release Year")
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
 
         self.file_mode = tk.StringVar(value="single")
         self.artist_var = tk.StringVar()
         self.title_var = tk.StringVar()
+        self.file_path_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
-        self.result_var = tk.StringVar(value="Enter an artist and title to start.")
+        self.result_var = tk.StringVar(value="Select a file or folder to start.")
 
         self._build_menu()
         self._build_layout()
@@ -425,19 +428,19 @@ class ReleaseYearApp:
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(row=0, column=0, sticky="nsew")
 
-        ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", pady=(0, 6))
-        artist_entry = ttk.Entry(frame, textvariable=self.artist_var, width=38)
-        artist_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(frame, text="Songs:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        scrollbar = tk.Scrollbar(frame, orient="vertical")
+        self.display = tk.Listbox(frame, height=24, width=100, yscrollcommand=scrollbar.set)
+        scrollbar.config(command=self.display.yview)
 
-        ttk.Label(frame, text="Title").grid(row=2, column=0, sticky="w", pady=(0, 6))
-        title_entry = ttk.Entry(frame, textvariable=self.title_var, width=38)
-        title_entry.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.display.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
 
         self.mode_label = ttk.Label(frame, text="Current mode: Singles")
         self.mode_label.grid(row=4, column=0, sticky="w", pady=(0, 10))
-
-        self.lookup_button = ttk.Button(frame, text="Find original year", command=self.lookup_year)
-        self.lookup_button.grid(row=5, column=0, sticky="ew", pady=(0, 12))
 
         ttk.Label(frame, textvariable=self.result_var, wraplength=300).grid(
             row=6, column=0, sticky="w", pady=(0, 8)
@@ -446,7 +449,7 @@ class ReleaseYearApp:
             row=7, column=0, sticky="w"
         )
 
-        artist_entry.focus()
+        self.display.focus()
         self.root.bind("<Return>", lambda _event: self.lookup_year())
 
     def _update_mode_label(self) -> None:
@@ -478,6 +481,19 @@ class ReleaseYearApp:
         #        self.status_var.showMessage(f"{artist} - {song_title} ({album})")
         return artist, song_title, album
 
+    def _update_file_year_if_earlier(
+        self, file_path: str, worker_year: Optional[int]
+    ) -> Optional[int]:
+        if worker_year is None:
+            return None
+        file = MediaFile(file_path)
+        metadata_year = _coerce_media_year(getattr(file, "year", None))
+        if metadata_year is None or worker_year >= metadata_year:
+            return metadata_year
+        file.year = worker_year
+        file.save()
+        return metadata_year
+
     def open_file(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Choose File to Open",
@@ -492,9 +508,8 @@ class ReleaseYearApp:
                     artist, song_title, _ = metadata
                     self.artist_var.set(artist)
                     self.title_var.set(song_title)
-                    self._lookup_year_worker(
-                        artist, song_title, file_mode=self.file_mode.get()
-                    )
+                    self.file_path_var.set(file_path)
+                    self.lookup_year()
         else:
             self.status_var.set("No file selected.")
 
@@ -523,9 +538,9 @@ class ReleaseYearApp:
                     artist, song_title, album = metadata
                     if album:
                         if album not in albums:
-                            albums[album] = [(artist, song_title)]
+                            albums[album] = [(artist, song_title, file_path)]
                         else:
-                            song = (artist, song_title)
+                            song = (artist, song_title, file_path)
                             albums[album].append(song)
             if not albums:
                 messagebox.showinfo("No album data", "No album metadata found in the audio files.")
@@ -534,21 +549,24 @@ class ReleaseYearApp:
             folder_artists = set()
             for album in albums:
                 folder_artists.add(albums[album][0][0]) # collect unique artists
+            if not folder_artists:
+                self.status_var.set(
+                    f"No artist data found for album '{album}'. Skipping."
+                )
+                return
             if len(folder_artists) > 1:
                 self.status_var.set(f"Multiple artists found")
                 for album in albums:
-                    artist = albums[album][0][0]
-                    song_title = albums[album][0][1]
-                    self._lookup_year_worker(
-                artist, song_title, file_mode="single")                
-            if not folder_artists:
-                self.status_var.set(f"No artist data found for album '{album}'. Skipping.")
-                return
-            artist = folder_artists.pop()
-            self._lookup_year_worker(
-                artist, album, file_mode=self.file_mode.get()
-            )
-            return
+                    self.artist_var.set(albums[album][0][0])
+                    self.title_var.set(albums[album][0][1])
+                    self.file_path_var.set(albums[album][0][2])
+                    self.file_mode.set("single")
+                    self.lookup_year()               
+            else:
+                self.artist_var.set(folder_artists.pop())
+                self.title_var.set(album)
+                self.file_path_var.set(file_path)
+                self.lookup_year()
 
     def lookup_year(self) -> None:
         artist = self.artist_var.get().strip()
@@ -558,22 +576,35 @@ class ReleaseYearApp:
             messagebox.showerror("Missing data", "Please enter both artist and title.")
             return
 
-        self.lookup_button.config(state="disabled")
         self.status_var.set("Searching MusicBrainz and Discogs...")
         self.result_var.set("Working...")
 
         worker = threading.Thread(
             target=self._lookup_year_worker,
-            args=(artist, title, self.file_mode.get()),
+            args=(artist, title, self.file_mode.get(), self.file_path_var.get()),
             daemon=True,
         )
         worker.start()
 
     def _lookup_year_worker(
-        self, artist: str, title: str, file_mode: str) -> None:
+        self, artist: str, title: str, file_mode: str, file_path: Optional[str] = None
+    ) -> None:
         try:
             year = first_release_year(artist, title, file_mode=file_mode)
-            self.root.after(0, lambda: self._handle_lookup_success(artist, title, file_mode, year))
+            metadata_year = None
+            if file_path:
+                metadata_year = self._update_file_year_if_earlier(file_path, year)
+            self.root.after(
+                0,
+                lambda: self._handle_lookup_success(
+                    artist,
+                    title,
+                    file_mode,
+                    year,
+                    file_path=file_path,
+                    metadata_year=metadata_year,
+                ),
+            )
         except Exception as e:
             error_message = str(e)
             self.root.after(0, lambda: self._handle_lookup_error(error_message=error_message))
@@ -584,21 +615,25 @@ class ReleaseYearApp:
         title: str,
         file_mode: str,
         year: Optional[int],
+        file_path: Optional[str] = None,
+        metadata_year: Optional[int] = None,
     ) -> None:
         mode_label = "album" if file_mode == "album" else "single"
         if year is None:
             self.result_var.set(f'No original {mode_label} year found for "{title}" by {artist}.')
         else:
-            self.result_var.set(
+            result = (
                 f'The earliest {mode_label} year for "{title}" by {artist} is {year}.'
             )
+            if file_path and metadata_year is not None and year < metadata_year:
+                result += f" Updated file metadata year from {metadata_year} to {year}."
+                self.display.insert(tk.END, result + "\n")
+            self.result_var.set(result)
         self.status_var.set("Finished")
-        self.lookup_button.config(state="normal")
 
     def _handle_lookup_error(self, error_message: str) -> None:
         self.result_var.set("Lookup failed.")
         self.status_var.set(error_message or "An unexpected error occurred.")
-        self.lookup_button.config(state="normal")
 
 
 def main() -> None:
