@@ -388,14 +388,16 @@ class ReleaseYearApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Original Release Year")
-        self.root.resizable(True, True)
+        self.root.resizable(False, True)
+        self.root.columnconfigure(0,weight=1)  
+        self.root.rowconfigure(0,weight=1)
 
         self.file_mode = tk.StringVar(value="single")
         self.artist_var = tk.StringVar()
         self.title_var = tk.StringVar()
         self.file_path_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
-        self.result_var = tk.StringVar(value="Select a file or folder to start.")
+        self.result_var = tk.StringVar(value="Select a file or folder to search.")
 
         self._build_menu()
         self._build_layout()
@@ -426,27 +428,27 @@ class ReleaseYearApp:
 
     def _build_layout(self) -> None:
         frame = ttk.Frame(self.root, padding=16)
-        frame.grid(row=0, column=0, sticky="nsew")
+        frame.grid(row=0, column=0, sticky="new")
 
-        ttk.Label(frame, text="Songs:").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(frame, text="Results:").grid(row=0, column=0, sticky="w", pady=(0, 6))
         scrollbar = tk.Scrollbar(frame, orient="vertical")
-        self.display = tk.Listbox(frame, height=24, width=100, yscrollcommand=scrollbar.set)
+        self.display = tk.Listbox(frame, height=10, width=150, yscrollcommand=scrollbar.set)
         scrollbar.config(command=self.display.yview)
 
-        frame.grid_rowconfigure(0, weight=1)
-        frame.grid_columnconfigure(0, weight=1)
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
 
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.display.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
 
         self.mode_label = ttk.Label(frame, text="Current mode: Singles")
-        self.mode_label.grid(row=4, column=0, sticky="w", pady=(0, 10))
+        self.mode_label.grid(row=2, column=0, sticky="w", pady=(0, 10))
 
         ttk.Label(frame, textvariable=self.result_var, wraplength=300).grid(
-            row=6, column=0, sticky="w", pady=(0, 8)
+            row=3, column=0, sticky="w", pady=(0, 8)
         )
         ttk.Label(frame, textvariable=self.status_var, foreground="#555555").grid(
-            row=7, column=0, sticky="w"
+            row=5, column=0, sticky="w"
         )
 
         self.display.focus()
@@ -548,7 +550,8 @@ class ReleaseYearApp:
                 return
             folder_artists = set()
             for album in albums:
-                folder_artists.add(albums[album][0][0]) # collect unique artists
+                for song in albums[album]:
+                    folder_artists.add(song[0]) # collect unique artists
             if not folder_artists:
                 self.status_var.set(
                     f"No artist data found for album '{album}'. Skipping."
@@ -557,11 +560,12 @@ class ReleaseYearApp:
             if len(folder_artists) > 1:
                 self.status_var.set(f"Multiple artists found")
                 for album in albums:
-                    self.artist_var.set(albums[album][0][0])
-                    self.title_var.set(albums[album][0][1])
-                    self.file_path_var.set(albums[album][0][2])
-                    self.file_mode.set("single")
-                    self.lookup_year()               
+                    for song in albums[album]:
+                        self.artist_var.set(song[0])
+                        self.title_var.set(song[1])
+                        self.file_path_var.set(song[2])
+                        self.file_mode.set("single")
+                        self.lookup_year()
             else:
                 self.artist_var.set(folder_artists.pop())
                 self.title_var.set(album)
@@ -618,18 +622,23 @@ class ReleaseYearApp:
         file_path: Optional[str] = None,
         metadata_year: Optional[int] = None,
     ) -> None:
-        mode_label = "album" if file_mode == "album" else "single"
+        mode_label = "album" if file_mode == "album" else "song"
         if year is None:
-            self.result_var.set(f'No original {mode_label} year found for "{title}" by {artist}.')
+            result =(
+                f'No {mode_label} release year found for "{title}" by {artist}.'
+            )
+            self.display.insert(tk.END, result + "\n")
+            self.display.itemconfig(tk.END, {"foreground": "red"})
         else:
             result = (
-                f'The earliest {mode_label} year for "{title}" by {artist} is {year}.'
+                f'For {mode_label} "{title}" by {artist} found release year: {year}.'
             )
             if file_path and metadata_year is not None and year < metadata_year:
                 result += f" Updated file metadata year from {metadata_year} to {year}."
-                self.display.insert(tk.END, result + "\n")
-            self.result_var.set(result)
-        self.status_var.set("Finished")
+            self.display.insert(tk.END, result + "\n")
+            self.display.itemconfig(tk.END, {"foreground": "green"} if file_path and metadata_year is not None and year < metadata_year else {})
+        self.result_var.set("Finished! Select a file or folder for a new search.")
+        self.status_var.set("Ready!")
 
     def _handle_lookup_error(self, error_message: str) -> None:
         self.result_var.set("Lookup failed.")
