@@ -3,6 +3,10 @@ musicbrainz_release_year.py
 ────────────────────────────
 Returns the first (oldest) release year for a song or album via the
 MusicBrainz API, filtering out non-canonical variants.
+
+Resilience: _mb_get retries automatically on transient HTTP errors
+(503 / 429 / 502 / 504) with exponential back-off and honours the
+Retry-After response header when present.
 """
 
 import re
@@ -13,8 +17,14 @@ from requests.auth import HTTPDigestAuth
 # ── Constants ────────────────────────────────────────────────────────────────
 
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
-_MB_ROOT    = "https://musicbrainz.org/ws/2/"
-_AUTH       = HTTPDigestAuth("EcoG", "3rfweqf345)^")
+_MB_ROOT = "https://musicbrainz.org/ws/2/"
+_AUTH = HTTPDigestAuth("EcoG", "3rfweqf345)^")
+
+# MusicBrainz recommends ≤1 request/second for authenticated clients.
+_REQUEST_DELAY = 1.1  # seconds inserted before every request
+_RETRY_STATUSES = {429, 502, 503, 504}
+_MAX_RETRIES = 5
+_BACKOFF_BASE = 2.0  # seconds; doubles on each retry (2 → 4 → 8 → 16 …)
 
 _BAD_VERSION_RE = re.compile(
     r"""
@@ -51,6 +61,7 @@ _BAD_SECONDARY_TYPES = {
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _clean_title(title: str) -> str:
     """Strip bracketed noise tokens, then collapse whitespace."""
     return _TITLE_NOISE_RE.sub(" ", title).strip()
@@ -62,28 +73,58 @@ def _is_bad_version(title: str) -> bool:
 
 
 def _titles_match(query_title: str, candidate_title: str) -> bool:
-    """
-    Case-insensitive comparison after stripping noise from both sides.
-    """
+    """Case-insensitive comparison after stripping noise from both sides."""
     return (
-        _clean_title(query_title).casefold()
-        == _clean_title(candidate_title).casefold()
+        _clean_title(query_title).casefold() == _clean_title(candidate_title).casefold()
     )
 
 
 def _mb_get(endpoint: str, params: dict) -> dict:
-    """Perform a GET request against the MusicBrainz API."""
+    """
+    GET request against the MusicBrainz API with:
+      • a polite inter-request delay (_REQUEST_DELAY seconds)
+      • automatic retry + exponential back-off on transient errors
+        (429, 502, 503, 504); honours the Retry-After header when present.
+
+    Raises the underlying HTTPError only after all retries are exhausted.
+    """
     headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
-    params["fmt"] = "json"
-    response = requests.get(
-        _MB_ROOT + endpoint,
-        params=params,
-        headers=headers,
-        auth=_AUTH,
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
+    params = {**params, "fmt": "json"}
+    url = _MB_ROOT + endpoint
+
+    for attempt in range(_MAX_RETRIES):
+        # Polite delay before every request (including the very first one)
+        time.sleep(_REQUEST_DELAY)
+
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            auth=_AUTH,
+            timeout=20,
+        )
+
+        # Success or a permanent client error → return / raise immediately
+        if response.status_code not in _RETRY_STATUSES:
+            response.raise_for_status()
+            return response.json()
+
+        # Transient server error – decide how long to wait
+        if attempt == _MAX_RETRIES - 1:
+            # All retries spent; surface the error
+            response.raise_for_status()
+
+        retry_after = response.headers.get("Retry-After")
+        wait = float(retry_after) if retry_after else _BACKOFF_BASE * (2**attempt)
+
+        print(
+            f"[MusicBrainz] HTTP {response.status_code} on attempt "
+            f"{attempt + 1}/{_MAX_RETRIES} – retrying in {wait:.1f}s …"
+        )
+        time.sleep(wait)
+
+    # Unreachable, but keeps type-checkers happy
+    raise RuntimeError("Exceeded maximum retries for MusicBrainz API")
 
 
 def _parse_year(date_str: str | None) -> int | None:
@@ -96,6 +137,7 @@ def _parse_year(date_str: str | None) -> int | None:
 
 # ── Core logic ───────────────────────────────────────────────────────────────
 
+
 def _first_year_for_recording(recording_mbid: str) -> int | None:
     """
     Given a recording MBID, fetch all its releases and return the
@@ -103,7 +145,7 @@ def _first_year_for_recording(recording_mbid: str) -> int | None:
     """
     data = _mb_get(
         f"recording/{recording_mbid}",
-        {"inc": "releases"},
+        {"inc": "releases release-groups"},
     )
     years = []
     for release in data.get("releases", []):
@@ -111,11 +153,9 @@ def _first_year_for_recording(recording_mbid: str) -> int | None:
         # Skip non-canonical release variants by title keywords
         if _is_bad_version(release_title):
             continue
-        # Check secondary types via the release-group if present
+        # Check secondary types on the release-group if present
         rg = release.get("release-group", {})
-        secondary_types = {
-            t.casefold() for t in rg.get("secondary-types", [])
-        }
+        secondary_types = {t.casefold() for t in rg.get("secondary-types", [])}
         if secondary_types & _BAD_SECONDARY_TYPES:
             continue
         year = _parse_year(release.get("date"))
@@ -130,7 +170,7 @@ def _first_year_single(title: str, artist: str) -> int | None:
     release year.
     """
     query = f'recording:"{title}" AND artist:"{artist}"'
-    data  = _mb_get("recording", {"query": query, "limit": 25})
+    data = _mb_get("recording", {"query": query, "limit": 25})
 
     best_year: int | None = None
 
@@ -145,15 +185,17 @@ def _first_year_single(title: str, artist: str) -> int | None:
         if _is_bad_version(rec_title):
             continue
 
-        # Verify the artist name
+        # Verify the artist name (partial / case-insensitive)
         artist_credits = rec.get("artist-credit", [])
-        artist_names   = [
+        artist_names = [
             ac.get("artist", {}).get("name", "").casefold()
             for ac in artist_credits
             if isinstance(ac, dict)
         ]
-        if not any(artist.casefold() in name or name in artist.casefold()
-                   for name in artist_names):
+        if not any(
+            artist.casefold() in name or name in artist.casefold()
+            for name in artist_names
+        ):
             continue
 
         mbid = rec.get("id")
@@ -173,7 +215,7 @@ def _first_year_album(title: str, artist: str) -> int | None:
     canonical first-release year.
     """
     query = f'release-group:"{title}" AND artist:"{artist}"'
-    data  = _mb_get("release-group", {"query": query, "limit": 25})
+    data = _mb_get("release-group", {"query": query, "limit": 25})
 
     best_year: int | None = None
 
@@ -184,15 +226,8 @@ def _first_year_album(title: str, artist: str) -> int | None:
         if not _titles_match(title, rg_title):
             continue
 
-        # Primary type must be Album (or unset); never a bad primary type
-        primary_type = rg.get("primary-type", "Album")
-        if primary_type and primary_type.casefold() not in ("album", "single", "ep", ""):
-            continue
-
         # Reject bad secondary types
-        secondary_types = {
-            t.casefold() for t in rg.get("secondary-types", [])
-        }
+        secondary_types = {t.casefold() for t in rg.get("secondary-types", [])}
         if secondary_types & _BAD_SECONDARY_TYPES:
             continue
 
@@ -208,6 +243,7 @@ def _first_year_album(title: str, artist: str) -> int | None:
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
+
 
 def get_first_release_year(title: str, artist: str, title_type: str) -> int | None:
     """
@@ -230,9 +266,7 @@ def get_first_release_year(title: str, artist: str, title_type: str) -> int | No
     ValueError  : If title_type is not "single" or "album".
     """
     if title_type not in ("single", "album"):
-        raise ValueError(
-            f'title_type must be "single" or "album", got {title_type!r}'
-        )
+        raise ValueError(f'title_type must be "single" or "album", got {title_type!r}')
 
     if title_type == "single":
         return _first_year_single(title, artist)
@@ -244,7 +278,7 @@ def get_first_release_year(title: str, artist: str, title_type: str) -> int | No
 
 if __name__ == "__main__":
     tests = [
-        ("Bohemian Rhapsody", "Queen",   "single"),
+        ("Bohemian Rhapsody", "Queen", "single"),
         ("A Night at the Opera", "Queen", "album"),
         ("Smells Like Teen Spirit", "Nirvana", "single"),
         ("Nevermind", "Nirvana", "album"),
@@ -252,7 +286,3 @@ if __name__ == "__main__":
     for t_title, t_artist, t_type in tests:
         year = get_first_release_year(t_title, t_artist, t_type)
         print(f"{t_type:6} | {t_artist} – {t_title!r:35} → {year}")
-        # Be polite to MB rate limiting
-        print("sleeping....")
-        time.sleep(1.05)
-        print("-" * 80)
