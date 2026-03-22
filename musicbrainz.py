@@ -16,21 +16,21 @@ from requests.auth import HTTPDigestAuth
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-_USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
-_MB_ROOT = "https://musicbrainz.org/ws/2/"
-_AUTH = HTTPDigestAuth("EcoG", "3rfweqf345)^")
+_USER_AGENT     = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+_MB_ROOT        = "https://musicbrainz.org/ws/2/"
+_AUTH           = HTTPDigestAuth("EcoG", "3rfweqf345)^")
 
 # MusicBrainz recommends ≤1 request/second for authenticated clients.
-_REQUEST_DELAY = 1.1  # seconds inserted before every request
+_REQUEST_DELAY  = 1.1     # seconds inserted before every request
 _RETRY_STATUSES = {429, 502, 503, 504}
-_MAX_RETRIES = 5
-_BACKOFF_BASE = 2.0  # seconds; doubles on each retry (2 → 4 → 8 → 16 …)
+_MAX_RETRIES    = 5
+_BACKOFF_BASE   = 2.0     # seconds; doubles on each retry (2 → 4 → 8 → 16 …)
 
 # Minimum Lucene relevance score (0–100) to accept a search hit.
-_MIN_SCORE = 90
+_MIN_SCORE      = 90
 
 # Page size for browse requests (max allowed by MusicBrainz).
-_BROWSE_LIMIT = 100
+_BROWSE_LIMIT   = 100
 
 _BAD_VERSION_RE = re.compile(
     r"""
@@ -65,8 +65,11 @@ _BAD_SECONDARY_TYPES = {
     "unofficial",
 }
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# Release-group primary types we trust for a song's canonical release.
+# "Other" covers soundtracks, radio shows, etc. — excluded by omission.
+_GOOD_PRIMARY_TYPES = {"single", "album", "ep"}
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 def _clean_title(title: str) -> str:
     """Strip bracketed noise tokens, then collapse whitespace."""
@@ -77,7 +80,7 @@ def _bracketed_parts_are_bad(raw_title: str) -> bool:
     """
     Return True only if the content *inside* brackets contains a bad-version
     keyword.  The base title (outside brackets) is intentionally not checked
-    so that songs like "Live and Let Die" or "The Mix-Up" are not rejected.
+    so that songs like "Live and Let Die" are not rejected.
 
     Examples
     --------
@@ -92,29 +95,25 @@ def _bracketed_parts_are_bad(raw_title: str) -> bool:
 def _titles_match(query_title: str, candidate_title: str) -> bool:
     """Case-insensitive comparison after stripping noise from both sides."""
     return (
-        _clean_title(query_title).casefold() == _clean_title(candidate_title).casefold()
+        _clean_title(query_title).casefold()
+        == _clean_title(candidate_title).casefold()
     )
 
 
 def _mb_get(endpoint: str, params: dict) -> dict:
     """
     GET against the MusicBrainz API with polite delay, retry, and back-off.
-
-    NOTE: inc= values must be separated by '+', not spaces.
+    inc= values must be joined with '+'.
     """
     headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
-    params = {**params, "fmt": "json"}
-    url = _MB_ROOT + endpoint
+    params  = {**params, "fmt": "json"}
+    url     = _MB_ROOT + endpoint
 
     for attempt in range(_MAX_RETRIES):
         time.sleep(_REQUEST_DELAY)
 
         response = requests.get(
-            url,
-            params=params,
-            headers=headers,
-            auth=_AUTH,
-            timeout=20,
+            url, params=params, headers=headers, auth=_AUTH, timeout=20,
         )
 
         if response.status_code not in _RETRY_STATUSES:
@@ -125,7 +124,7 @@ def _mb_get(endpoint: str, params: dict) -> dict:
             response.raise_for_status()
 
         retry_after = response.headers.get("Retry-After")
-        wait = float(retry_after) if retry_after else _BACKOFF_BASE * (2**attempt)
+        wait = float(retry_after) if retry_after else _BACKOFF_BASE * (2 ** attempt)
         print(
             f"[MusicBrainz] HTTP {response.status_code} on attempt "
             f"{attempt + 1}/{_MAX_RETRIES} – retrying in {wait:.1f}s …"
@@ -145,19 +144,10 @@ def _parse_year(date_str: str | None) -> int | None:
 
 # ── Core logic ───────────────────────────────────────────────────────────────
 
-
 def _browse_all_releases_for_recording(recording_mbid: str) -> list[dict]:
     """
-    Return ALL releases that contain this recording using paginated browse
-    requests.
-
-    Why browse instead of lookup?
-    ─────────────────────────────
-    A lookup (GET recording/{mbid}?inc=releases+release-groups) is capped
-    at 25 linked entities.  A popular song can appear on hundreds of
-    releases, so the 1975 original single may simply not appear in the
-    first page.  Browse requests support up to 100 results per page and
-    allow full pagination, guaranteeing we see every release.
+    Return ALL official releases containing this recording via paginated
+    browse requests (bypasses the 25-result lookup cap).
     """
     releases: list[dict] = []
     offset = 0
@@ -167,11 +157,10 @@ def _browse_all_releases_for_recording(recording_mbid: str) -> list[dict]:
             "release",
             {
                 "recording": recording_mbid,
-                # '+' is the required separator for multiple inc= values.
-                "inc": "release-groups",
+                "inc": "release-groups",   # '+'-joined; single value here
                 "limit": _BROWSE_LIMIT,
                 "offset": offset,
-                "status": "official",  # skip unofficial releases server-side
+                "status": "official",      # drop unofficial server-side
             },
         )
         page = data.get("releases", [])
@@ -185,43 +174,60 @@ def _browse_all_releases_for_recording(recording_mbid: str) -> list[dict]:
     return releases
 
 
+def _release_is_canonical(release: dict) -> bool:
+    """
+    Return True if a release passes all canonical filters:
+
+    1. Its own title's bracketed content must not contain bad-version keywords.
+    2. Its release-group must have a good primary type (Single / Album / EP).
+       "Other" (soundtracks, radio shows, …) is rejected by omission.
+    3. Its release-group must have no bad secondary types (compilation, live …).
+    4. Its release-group title's bracketed content must not be a bad variant.
+    """
+    # 1. Release title brackets
+    if _bracketed_parts_are_bad(release.get("title", "")):
+        return False
+
+    rg = release.get("release-group", {})
+
+    # 2. Primary type must be Single, Album, or EP
+    primary = rg.get("primary-type", "")
+    if primary.casefold() not in _GOOD_PRIMARY_TYPES:
+        return False
+
+    # 3. No bad secondary types
+    secondary = {t.casefold() for t in rg.get("secondary-types", [])}
+    if secondary & _BAD_SECONDARY_TYPES:
+        return False
+
+    # 4. Release-group title brackets
+    if _bracketed_parts_are_bad(rg.get("title", "")):
+        return False
+
+    return True
+
+
 def _earliest_canonical_release_year(recording_mbid: str) -> int | None:
     """
-    Return the earliest release year among all canonical releases that
-    contain this recording.
+    Browse all official releases for a recording and return the earliest
+    year among canonical ones.
     """
-    years: list[int] = []
-
-    for release in _browse_all_releases_for_recording(recording_mbid):
-        # Skip releases whose own title bracket content flags a bad variant
-        if _bracketed_parts_are_bad(release.get("title", "")):
-            continue
-
-        # Skip releases in a bad release-group (compilation, live, etc.)
-        rg = release.get("release-group", {})
-        secondary = {t.casefold() for t in rg.get("secondary-types", [])}
-        if secondary & _BAD_SECONDARY_TYPES:
-            continue
-
-        # Also reject if the release-group title's brackets are bad
-        if _bracketed_parts_are_bad(rg.get("title", "")):
-            continue
-
-        year = _parse_year(release.get("date"))
-        if year:
-            years.append(year)
-
+    years = [
+        year
+        for release in _browse_all_releases_for_recording(recording_mbid)
+        if _release_is_canonical(release)
+        and (year := _parse_year(release.get("date"))) is not None
+    ]
     return min(years) if years else None
 
 
 def _first_year_single(title: str, artist: str) -> int | None:
     """
     Search for recordings (song) and return the earliest canonical release
-    year, browsing all releases for each matching recording to defeat the
-    25-result lookup cap.
+    year across all matching recordings.
     """
     query = f'recording:"{title}" AND artist:"{artist}"'
-    data = _mb_get("recording", {"query": query, "limit": 25})
+    data  = _mb_get("release", {"query": query, "limit": 25})
 
     years: list[int] = []
 
@@ -236,21 +242,22 @@ def _first_year_single(title: str, artist: str) -> int | None:
         if not _titles_match(title, rec_title):
             continue
 
-        # 3. Reject if the *bracketed* portion contains a bad keyword
+        # 3. Reject if the *bracketed* portion of the recording title is bad
         if _bracketed_parts_are_bad(rec_title):
             continue
 
         # 4. Artist must match (partial / case-insensitive)
         credits = rec.get("artist-credit", [])
-        names = [
+        names   = [
             ac.get("artist", {}).get("name", "").casefold()
-            for ac in credits
-            if isinstance(ac, dict)
+            for ac in credits if isinstance(ac, dict)
         ]
-        if not any(artist.casefold() in n or n in artist.casefold() for n in names):
+        if not any(
+            artist.casefold() in n or n in artist.casefold() for n in names
+        ):
             continue
 
-        # 5. Browse ALL releases for this recording (bypasses the 25-cap)
+        # 5. Browse all releases for this recording, apply canonical filter
         mbid = rec.get("id")
         if not mbid:
             continue
@@ -268,7 +275,7 @@ def _first_year_album(title: str, artist: str) -> int | None:
     canonical first-release year.
     """
     query = f'release-group:"{title}" AND artist:"{artist}"'
-    data = _mb_get("release-group", {"query": query, "limit": 25})
+    data  = _mb_get("release-group", {"query": query, "limit": 25})
 
     years: list[int] = []
 
@@ -297,7 +304,6 @@ def _first_year_album(title: str, artist: str) -> int | None:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-
 def get_first_release_year(title: str, artist: str, title_type: str) -> int | None:
     """
     Return the first (oldest) canonical release year for a song or album.
@@ -319,12 +325,11 @@ def get_first_release_year(title: str, artist: str, title_type: str) -> int | No
     ValueError  : If title_type is not "single" or "album".
     """
     if title_type not in ("single", "album"):
-        raise ValueError(f'title_type must be "single" or "album", got {title_type!r}')
-    return (
-        _first_year_single(title, artist)
-        if title_type == "single"
+        raise ValueError(
+            f'title_type must be "single" or "album", got {title_type!r}'
+        )
+    return _first_year_single(title, artist) if title_type == "single" \
         else _first_year_album(title, artist)
-    )
 
 
 # ── Quick smoke-test ─────────────────────────────────────────────────────────
@@ -336,11 +341,17 @@ if __name__ == "__main__":
         ("Smells Like Teen Spirit", "Nirvana", "single", 1991),
         ("Nevermind", "Nirvana", "album", 1991),
         ("Live and Let Die", "Wings", "single", 1973),
+        ("Hey Ho", "GFreddy Kalas", "single", 2015),
+        ("Driving Home for Christmas (2019 Remaster)", "Chris Rea", "single", 1986),
+        ("Shut Up and Dance", "Walk the Moon", "single", 2014),
+        ("Die With A Smile", "Lady Gaga & Bruno Mars", "single", 2024),
+        ("For What It's Worth", "Buffalo Springfield", "single", 1966),
+        ("Calypso", "John Denver", "single", 1975),
     ]
     print(f"{'Type':6}  {'Artist + Title':<42}  {'Got':>4}  {'Exp':>4}  OK?")
     print("-" * 65)
     for t_title, t_artist, t_type, expected in tests:
         got = get_first_release_year(t_title, t_artist, t_type)
-        ok = "✓" if got == expected else "✗"
+        ok  = "✓" if got == expected else "✗"
         label = f"{t_artist} – {t_title}"
         print(f"{t_type:6}  {label:<42}  {str(got):>4}  {expected:>4}  {ok}")

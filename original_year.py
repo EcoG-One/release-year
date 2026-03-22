@@ -3,6 +3,7 @@ from __future__ import annotations
 from logging import root
 import os
 import re
+import time
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
@@ -17,6 +18,16 @@ _DISCOGS_BASE = "https://api.discogs.com"
 _DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _AUDIO_FILES = ("mp3", "flac", "wav", "aac", "ogg", "m4a", "opus", "alac", "aiff", "dsd", "pcm")
+
+_MB_MIN_REQUEST_INTERVAL = 1.0
+_DISCOGS_BURST_LIMIT = 60
+_DISCOGS_PAUSE_SECONDS = 60
+
+_mb_rate_lock = threading.Lock()
+_mb_last_request_at = 0.0
+
+_discogs_rate_lock = threading.Lock()
+_discogs_request_count = 0
 
 
 # ------------------------------------
@@ -116,9 +127,32 @@ def _http_get_json(
     headers: dict,
     params: Optional[dict] = None,
     timeout: int = 25,
+    service: Optional[str] = None,
 ) -> dict:
+    global _mb_last_request_at, _discogs_request_count
+
+    if service == "musicbrainz":
+        with _mb_rate_lock:
+            now = time.monotonic()
+            wait_time = _MB_MIN_REQUEST_INTERVAL - (now - _mb_last_request_at)
+            if wait_time > 0:
+                time.sleep(wait_time)
+            _mb_last_request_at = time.monotonic()
+    elif service == "discogs":
+        with _discogs_rate_lock:
+            if _discogs_request_count >= _DISCOGS_BURST_LIMIT:
+                print(f"Discogs request limit reached. Sleeping for {_DISCOGS_PAUSE_SECONDS} seconds...")
+                time.sleep(_DISCOGS_PAUSE_SECONDS)
+                _discogs_request_count = 0
+            _discogs_request_count += 1
+
     response = requests.get(url, headers=headers, params=params, timeout=timeout)
     response.raise_for_status()
+    """headers = response.headers
+    if "x-ratelimit-remaining" in headers and headers["x-ratelimit-remaining"] == "0":
+        reset_time = int(headers.get('x-discogs-ratelimit-reset', '60'))
+        print(f"Discogs rate limit hit. Sleeping for {reset_time} seconds...")
+        time.sleep(reset_time + 1)  # Sleep a bit longer to be safe """
     return response.json()
 
 
@@ -140,7 +174,7 @@ def _mb_search_recordings(
         query = f'recording:"{_norm_title(song_title)}" AND artist:"{_norm_artist(artist)}" AND status:"official" AND type:"single"'
         url = f"{_MB_BASE}/release"
     params = {"query": query, "fmt": "json", "limit": limit}
-    data = _http_get_json(url, headers=headers, params=params)
+    data = _http_get_json(url, headers=headers, params=params, service="musicbrainz")
     if file_mode == "album":
         return data.get("recordings") or []
     else:
@@ -282,7 +316,12 @@ def _discogs_search(
         "page": 1,
     }
     params = {key: value for key, value in params.items() if value is not None}
-    data = _http_get_json(f"{_DISCOGS_BASE}/database/search", headers=headers, params=params)
+    data = _http_get_json(
+        f"{_DISCOGS_BASE}/database/search",
+        headers=headers,
+        params=params,
+        service="discogs",
+    )
     return data.get("results") or []
 
 
