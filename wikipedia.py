@@ -315,7 +315,7 @@ def _first_year_from_article(page_title: str) -> int | None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def get_first_release_year(title: str, artist: str, title_type: str) -> int | None:
+def get_first_release_year_wp(title: str, artist: str, title_type: str) -> int | None:
     """
     Return the first (oldest) canonical release year for a song or album
     using the Wikipedia API.
@@ -365,7 +365,7 @@ if __name__ == "__main__":
     print(f"{'Type':6}  {'Artist + Title':<50}  {'Got':>4}  {'Exp':>4}  OK?")
     print("-" * 74)
     for t_title, t_artist, t_type, expected in tests:
-        got = get_first_release_year(t_title, t_artist, t_type)
+        got = get_first_release_year_wp(t_title, t_artist, t_type)
         ok  = "✓" if got == expected else "✗"
         label = f"{t_artist} – {t_title}"
         print(f"{t_type:6}  {label:<50}  {str(got):>4}  {expected:>4}  {ok}")

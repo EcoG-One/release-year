@@ -10,7 +10,8 @@ from tkinter import messagebox, ttk, filedialog
 from typing import List, Optional
 from mediafile import MediaFile
 from wiki import get_song_release_date
-from musicbrainz import get_first_release_year
+from musicbrainz import get_first_release_year_mb
+from wikipedia import get_first_release_year_wp
 import requests
 
 
@@ -393,32 +394,30 @@ def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional
     """
     mb_year = None
     dc_year = None
+    wp_year = None
 
-    """try:
-        mb_year = get_first_release_year(song_title, artist, file_mode)
+    try:
+        mb_year = get_first_release_year_mb(song_title, artist, file_mode)
     except requests.RequestException:
         mb_year = None
 
     try:
         dc_year = _discogs_first_year(song_title, artist, file_mode=file_mode)
     except requests.RequestException:
-        dc_year = None"""
+        dc_year = None
 
-    years = [year for year in (mb_year, dc_year) if isinstance(year, int)]
+    try:
+        wp_year = get_first_release_year_wp(song_title, artist, file_mode)
+    except requests.RequestException:
+        wp_year = None
+
+    years = [year for year in (mb_year, dc_year, wp_year) if isinstance(year, int)]
     if years:
-        print(f"{artist} - {song_title}. Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year})")
+        print(f"{artist} - {song_title}. Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year}, Wikipedia: {wp_year})")
         return min(years)
     else:
-        wikipedia_date = get_song_release_date(song_title.strip(), artist.strip())
-        if wikipedia_date:
-            min_year = _extract_year(wikipedia_date)
-            if min_year:
-                print(
-                    f"{artist} - {song_title}. Found year on Wikipedia: {min_year} (date string: {wikipedia_date})"
-                )
-                return min_year
-            else:
-                return None
+        print(f"Could not find a release year for {artist} - {song_title}.")
+        return None
 
 # ----------------------------
 #       GUI Application
@@ -620,7 +619,7 @@ class ReleaseYearApp:
             messagebox.showerror("Missing data", "Please enter both artist and title.")
             return
 
-        self.status_var.set("Searching MusicBrainz and Discogs...")
+        self.status_var.set("Searching MusicBrainz. Discogs and Wikipedia...")
         self.result_var.set("Working...")
 
         worker = threading.Thread(
