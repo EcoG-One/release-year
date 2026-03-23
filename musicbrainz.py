@@ -357,6 +357,7 @@ def get_first_release_year(title: str, artist: str, title_type: str) -> int | No
 
 if __name__ == "__main__":
     tests = [
+        ("Prayer in C (Robin Schulz Radio Edit)", "Lilly Wood & The Prick", "single", 2014),
         ("For What It's Worth", "Buffalo Springfield", "single", 1966),
         ("Calypso", "John Denver", "single", 1975),
         ("Driving Home for Christmas", "Chris Rea", "single", 1986),

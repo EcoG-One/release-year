@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk, filedialog
 from typing import List, Optional
 from mediafile import MediaFile
 from wiki import get_song_release_date
+from musicbrainz import get_first_release_year
 import requests
 
 
@@ -393,15 +394,15 @@ def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional
     mb_year = None
     dc_year = None
 
-    try:
-        mb_year = _musicbrainz_first_year(song_title, artist, file_mode=file_mode)
+    """try:
+        mb_year = get_first_release_year(song_title, artist, file_mode)
     except requests.RequestException:
         mb_year = None
 
     try:
         dc_year = _discogs_first_year(song_title, artist, file_mode=file_mode)
     except requests.RequestException:
-        dc_year = None
+        dc_year = None"""
 
     years = [year for year in (mb_year, dc_year) if isinstance(year, int)]
     if years:
