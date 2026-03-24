@@ -386,7 +386,7 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
 # ----------------------------
 
 
-def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional[int]:
+def first_release_year(artist: str, song_title: str, file_mode: str, mb: bool, dc: bool, wp: bool) -> Optional[int]:
     """
     Returns earliest plausible release year found across MusicBrainz + Discogs, with heuristics
     to reduce false positives (covers/live/remasters/etc.). If not found, tries Wikipedia.Returns None if not found.
@@ -396,20 +396,26 @@ def first_release_year(artist: str, song_title: str, file_mode: str) -> Optional
     dc_year = None
     wp_year = None
 
-    try:
-        mb_year = get_first_release_year_mb(song_title, artist, file_mode)
-    except requests.RequestException:
-        mb_year = None
+    if mb:
+        try:
+            print("Searching MusicBrainz...")
+            mb_year = get_first_release_year_mb(song_title, artist, file_mode)
+        except requests.RequestException:
+            mb_year = None
 
-    try:
-        dc_year = _discogs_first_year(song_title, artist, file_mode=file_mode)
-    except requests.RequestException:
-        dc_year = None
+    if dc:
+        try:
+            print("Searching Discogs...")
+            dc_year = _discogs_first_year(song_title, artist, file_mode=file_mode)
+        except requests.RequestException:
+            dc_year = None
 
-    try:
-        wp_year = get_first_release_year_wp(song_title, artist, file_mode)
-    except requests.RequestException:
-        wp_year = None
+    if wp:
+        try:
+            print("Searching Wikipedia...")
+            wp_year = get_first_release_year_wp(song_title, artist, file_mode)
+        except requests.RequestException:
+            wp_year = None
 
     years = [year for year in (mb_year, dc_year, wp_year) if isinstance(year, int)]
     if years:
@@ -432,6 +438,9 @@ class ReleaseYearApp:
         self.root.rowconfigure(0,weight=1)
 
         self.file_mode = tk.StringVar(value="single")
+        self.source_mb = tk.BooleanVar(value=False)
+        self.source_dc = tk.BooleanVar(value=True)
+        self.source_wp = tk.BooleanVar(value=False)
         self.artist_var = tk.StringVar()
         self.title_var = tk.StringVar()
         self.file_path_var = tk.StringVar()
@@ -458,6 +467,24 @@ class ReleaseYearApp:
         )
         menu_bar.add_cascade(label="Mode", menu=mode_menu)
 
+        source_menu = tk.Menu(menu_bar, tearoff=False)
+        source_menu.add_checkbutton(
+            label="MusicBrainz",
+            variable=self.source_mb,
+            command=self._update_source_label,
+        )
+        source_menu.add_checkbutton(
+            label="Discogs",
+            variable=self.source_dc,
+            command=self._update_source_label,
+        )
+        source_menu.add_checkbutton(
+            label="Wikipedia",
+            variable=self.source_wp,
+            command=self._update_source_label,
+        )
+        menu_bar.add_cascade(label="Source", menu=source_menu)
+
         select_menu = tk.Menu(menu_bar, tearoff=False)
         select_menu.add_command(label="File", command=self.open_file)
         select_menu.add_command(label="Folder",command=self.open_folder)
@@ -483,8 +510,11 @@ class ReleaseYearApp:
         self.mode_label = ttk.Label(frame, text="Current mode: Singles")
         self.mode_label.grid(row=2, column=0, sticky="w", pady=(0, 10))
 
+        self.source_label = ttk.Label(frame, text="Current source: Discogs")
+        self.source_label.grid(row=3, column=0, sticky="w", pady=(0, 10))
+
         ttk.Label(frame, textvariable=self.result_var, wraplength=300).grid(
-            row=3, column=0, sticky="w", pady=(0, 8)
+            row=4, column=0, sticky="w", pady=(0, 8)
         )
         ttk.Label(frame, textvariable=self.status_var, foreground="#555555").grid(
             row=5, column=0, sticky="w"
@@ -496,6 +526,20 @@ class ReleaseYearApp:
     def _update_mode_label(self) -> None:
         label = "Albums" if self.file_mode.get() == "album" else "Singles"
         self.mode_label.config(text=f"Current mode: {label}")
+
+    def _update_source_label(self) -> None:
+        sources = []
+        if self.source_mb.get():
+            sources.append("MusicBrainz")
+        if self.source_dc.get():
+            sources.append("Discogs")
+        if self.source_wp.get():
+            sources.append("Wikipedia")
+        label = ", ".join(sources) if sources else "None"
+        if len(sources) > 1:
+            self.source_label.config(text=f"Current sources: {label}")
+        else:
+            self.source_label.config(text=f"Current source: {label}")
 
     def get_basic_metadata(self, file_path):
         song_title = os.path.basename(file_path)
@@ -633,7 +677,7 @@ class ReleaseYearApp:
         self, artist: str, title: str, file_mode: str, file_path: Optional[str] = None
     ) -> None:
         try:
-            year = first_release_year(artist, title, file_mode=file_mode)
+            year = first_release_year(artist, title, file_mode=file_mode, mb=self.source_mb.get(), dc=self.source_dc.get(), wp=self.source_wp.get())
             metadata_year = None
             if file_path:
                 metadata_year = self._update_file_year_if_earlier(file_path, year)
