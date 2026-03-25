@@ -13,7 +13,7 @@ import requests
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
-WIKIPEDIA_API        = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
 WIKIPEDIA_USER_AGENT = "HitPlay/1.0 (ecog@outlook.de)"
 
 _BAD_VERSION_RE = re.compile(
@@ -33,9 +33,20 @@ _TITLE_NOISE_RE = re.compile(
 )  # remove (...) / [...] / {...} parts
 
 _BAD_SECONDARY_TYPES = {
-    "compilation", "live", "remix", "dj-mix", "demo", "bootleg",
-    "promotional", "promo", "interview", "audiobook", "audio drama",
-    "spokenword", "field recording", "unofficial",
+    "compilation",
+    "live",
+    "remix",
+    "dj-mix",
+    "demo",
+    "bootleg",
+    "promotional",
+    "promo",
+    "interview",
+    "audiobook",
+    "audio drama",
+    "spokenword",
+    "field recording",
+    "unofficial",
 }
 
 # Any 4-digit year between 1900 and 2099
@@ -57,7 +68,45 @@ _RELEASE_FIELDS = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
+# Matches a year that is directly preceded by the word "released" (with optional
+# intervening prepositions, type words, and/or a full date fragment).
+# This anchors on the word "released" to avoid picking up birth years, chart
+# positions, catalogue numbers, or other irrelevant numeric context.
+#
+# Handles all common Wikipedia intro phrasings:
+#   "released in 1975"
+#   "released on October 31, 1975"
+#   "released on 31 October 1975"
+#   "released as a single in 1991"
+#   "first released in 1966"
+#   "officially released on 1 November 1973"
+_RELEASED_YEAR_RE = re.compile(
+    r"""
+    \b released \b              # anchor word
+    \s+                          # mandatory whitespace
+    (?:
+        # Optional leading preposition / qualifier words:
+        # "in", "on", "as a single on", "as a double A-side in", etc.
+        (?:(?:\w+)\s+){0,5}
+    )?
+    (?:
+        # Optional full date fragment directly before the year:
+        #   "October 31," / "October," / "31 October"
+        (?:january|february|march|april|may|june|july|august|
+           september|october|november|december)
+        (?:\s+\d{1,2})?,?\s*
+      |
+        \d{1,2}\s+
+        (?:january|february|march|april|may|june|july|august|
+           september|october|november|december),?\s*
+    )?
+    (19\d{2}|20\d{2})           # capture group: the year
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
+
 
 def _clean_title(title: str) -> str:
     return _TITLE_NOISE_RE.sub(" ", title).strip()
@@ -79,8 +128,11 @@ def _field_is_bad(field_value: str) -> bool:
     non-canonical variant.  Checks both base text and bracketed parts so we
     catch e.g. '| released = 1977 (remaster)'.
     """
-    return bool(_BAD_VERSION_RE.search(field_value)) if _bracketed_parts_are_bad(field_value) \
+    return (
+        bool(_BAD_VERSION_RE.search(field_value))
+        if _bracketed_parts_are_bad(field_value)
         else False
+    )
 
 
 def _years_from_text(text: str) -> list[int]:
@@ -106,10 +158,11 @@ def _years_from_date_templates(text: str) -> list[int]:
 
 # ── Wikipedia API ─────────────────────────────────────────────────────────────
 
+
 def _wiki_get(params: dict) -> dict:
     """Thin wrapper around the Wikipedia API."""
     headers = {"User-Agent": WIKIPEDIA_USER_AGENT}
-    params  = {"format": "json", "formatversion": "2", **params}
+    params = {"format": "json", "formatversion": "2", **params}
     r = requests.get(WIKIPEDIA_API, params=params, headers=headers, timeout=15)
     r.raise_for_status()
     return r.json()
@@ -120,27 +173,31 @@ def _search_articles(query: str, limit: int = 8) -> list[dict]:
     Full-text search; returns a list of {title, snippet} dicts ranked by
     Wikipedia's own relevance score.
     """
-    data = _wiki_get({
-        "action": "query",
-        "list":   "search",
-        "srsearch": query,
-        "srlimit": limit,
-        "srinfo":  "",
-        "srprop":  "snippet",
-    })
+    data = _wiki_get(
+        {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "srlimit": limit,
+            "srinfo": "",
+            "srprop": "snippet",
+        }
+    )
     return data.get("query", {}).get("search", [])
 
 
 def _get_wikitext(page_title: str) -> str | None:
     """Fetch the raw wikitext of a Wikipedia article by its exact title."""
-    data = _wiki_get({
-        "action":  "query",
-        "prop":    "revisions",
-        "titles":  page_title,
-        "rvslots": "main",
-        "rvprop":  "content",
-        "redirects": 1,
-    })
+    data = _wiki_get(
+        {
+            "action": "query",
+            "prop": "revisions",
+            "titles": page_title,
+            "rvslots": "main",
+            "rvprop": "content",
+            "redirects": 1,
+        }
+    )
     pages = data.get("query", {}).get("pages", [])
     if not pages:
         return None
@@ -158,22 +215,53 @@ def _get_plain_intro(page_title: str) -> str:
     Fetch the plain-text introduction of a Wikipedia article (first ~500 chars).
     Used as a year-extraction fallback.
     """
-    data = _wiki_get({
-        "action":   "query",
-        "prop":     "extracts",
-        "titles":   page_title,
-        "exintro":  True,
-        "explaintext": True,
-        "exsentences": 3,
-        "redirects": 1,
-    })
+    data = _wiki_get(
+        {
+            "action": "query",
+            "prop": "extracts",
+            "titles": page_title,
+            "exintro": True,
+            "explaintext": True,
+            "exsentences": 3,
+            "redirects": 1,
+        }
+    )
     pages = data.get("query", {}).get("pages", [])
     if not pages or pages[0].get("missing"):
         return ""
     return pages[0].get("extract", "")
 
 
+def _years_from_released_context(text: str) -> list[int]:
+    """
+    Extract years that are directly preceded by the word "released" in
+    plain text (Wikipedia article intro).
+
+    Unlike the bare _years_from_text(), this function ignores years that
+    appear in unrelated contexts — birth years, chart positions, catalogue
+    numbers, etc. — because those are never directly preceded by "released".
+
+    Also skips years where the surrounding sentence context contains a
+    bad-version indicator (e.g. "remastered and released in 2001"), so that
+    re-release dates don't override the original.
+    """
+    years: list[int] = []
+    for m in _RELEASED_YEAR_RE.finditer(text):
+        year = int(m.group(1))
+
+        # Check the local context window (~60 chars before the match) for
+        # bad-version words — catches "remastered and released in 2001" etc.
+        start = max(0, m.start() - 60)
+        context = text[start : m.end()]
+        if _BAD_VERSION_RE.search(context):
+            continue
+
+        years.append(year)
+    return years
+
+
 # ── Infobox parsing ──────────────────────────────────────────────────────────
+
 
 def _extract_years_from_infobox(wikitext: str) -> list[int]:
     """
@@ -225,19 +313,18 @@ _BAD_ARTICLE_RE = re.compile(
 
 _TYPE_KEYWORDS = {
     "single": ["single", "song"],
-    "album":  ["album", "studio album", "record"],
+    "album": ["album", "studio album", "record"],
 }
 
 
-def _score_candidate(result: dict, title: str, artist: str,
-                      title_type: str) -> float:
+def _score_candidate(result: dict, title: str, artist: str, title_type: str) -> float:
     """
     Heuristic score for a Wikipedia search result (higher = better).
     Returns -1 to reject outright.
     """
-    art_title  = result.get("title", "")
-    snippet    = result.get("snippet", "").lower()
-    art_lower  = art_title.lower()
+    art_title = result.get("title", "")
+    snippet = result.get("snippet", "").lower()
+    art_lower = art_title.lower()
     query_clean = _clean_title(title).casefold()
 
     # Hard reject: obviously bad article
@@ -268,17 +355,18 @@ def _find_best_article(title: str, artist: str, title_type: str) -> str | None:
     # Try a specific query first
     for query in [
         f"{title} {artist} {title_type}",
-        f"{title} {artist} song" if title_type == "single" else f"{title} {artist} album",
+        (
+            f"{title} {artist} song"
+            if title_type == "single"
+            else f"{title} {artist} album"
+        ),
         f"{title} {artist}",
     ]:
         results = _search_articles(query, limit=10)
         if not results:
             continue
 
-        scored = [
-            (r, _score_candidate(r, title, artist, title_type))
-            for r in results
-        ]
+        scored = [(r, _score_candidate(r, title, artist, title_type)) for r in results]
         scored = [(r, s) for r, s in scored if s >= 0]
         if not scored:
             continue
@@ -292,6 +380,7 @@ def _find_best_article(title: str, artist: str, title_type: str) -> str | None:
 
 # ── Core logic ────────────────────────────────────────────────────────────────
 
+
 def _first_year_from_article(page_title: str) -> int | None:
     """
     Fetch a Wikipedia article and extract the earliest plausible release year
@@ -304,9 +393,12 @@ def _first_year_from_article(page_title: str) -> int | None:
     years = _extract_years_from_infobox(wikitext)
 
     if not years:
-        # Fallback: scan the introductory paragraph for a bare year
+        # Fallback: scan the introductory paragraph for a year that is
+        # directly preceded by the word "released".  This avoids pulling
+        # in irrelevant dates (artist birth year, chart positions, etc.)
+        # that a bare year scan would incorrectly pick up.
         intro = _get_plain_intro(page_title)
-        years = _years_from_text(intro)
+        years = _years_from_released_context(intro)
 
     # Sanity clamp: ignore years before the LP era or in the future
     years = [y for y in years if 1940 <= y <= 2030]
@@ -314,6 +406,7 @@ def _first_year_from_article(page_title: str) -> int | None:
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
+
 
 def get_first_release_year_wp(title: str, artist: str, title_type: str) -> int | None:
     """
@@ -336,9 +429,7 @@ def get_first_release_year_wp(title: str, artist: str, title_type: str) -> int |
     ValueError  : If title_type is not "single" or "album".
     """
     if title_type not in ("single", "album"):
-        raise ValueError(
-            f'title_type must be "single" or "album", got {title_type!r}'
-        )
+        raise ValueError(f'title_type must be "single" or "album", got {title_type!r}')
 
     page_title = _find_best_article(title, artist, title_type)
     if not page_title:
@@ -351,21 +442,21 @@ def get_first_release_year_wp(title: str, artist: str, title_type: str) -> int |
 
 if __name__ == "__main__":
     tests = [
-        ("Bohemian Rhapsody",          "Queen",               "single", 1975),
-        ("A Night at the Opera",       "Queen",               "album",  1975),
-        ("Smells Like Teen Spirit",    "Nirvana",             "single", 1991),
-        ("Nevermind",                  "Nirvana",             "album",  1991),
-        ("Live and Let Die",           "Wings",               "single", 1973),
-        ("Shut Up and Dance",          "Walk the Moon",       "single", 2014),
-        ("Die With a Smile",           "Lady Gaga",           "single", 2024),
-        ("For What It's Worth",        "Buffalo Springfield", "single", 1966),
-        ("Calypso",                    "John Denver",         "single", 1975),
-        ("Driving Home for Christmas", "Chris Rea",           "single", 1986),
+        ("Bohemian Rhapsody", "Queen", "single", 1975),
+        ("A Night at the Opera", "Queen", "album", 1975),
+        ("Smells Like Teen Spirit", "Nirvana", "single", 1991),
+        ("Nevermind", "Nirvana", "album", 1991),
+        ("Live and Let Die", "Wings", "single", 1973),
+        ("Shut Up and Dance", "Walk the Moon", "single", 2014),
+        ("Die With a Smile", "Lady Gaga", "single", 2024),
+        ("For What It's Worth", "Buffalo Springfield", "single", 1966),
+        ("Calypso", "John Denver", "single", 1975),
+        ("Driving Home for Christmas", "Chris Rea", "single", 1986),
     ]
     print(f"{'Type':6}  {'Artist + Title':<50}  {'Got':>4}  {'Exp':>4}  OK?")
     print("-" * 74)
     for t_title, t_artist, t_type, expected in tests:
         got = get_first_release_year_wp(t_title, t_artist, t_type)
-        ok  = "✓" if got == expected else "✗"
+        ok = "✓" if got == expected else "✗"
         label = f"{t_artist} – {t_title}"
         print(f"{t_type:6}  {label:<50}  {str(got):>4}  {expected:>4}  {ok}")
