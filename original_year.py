@@ -19,7 +19,19 @@ _MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
 _DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
-_AUDIO_FILES = ("mp3", "flac", "wav", "aac", "ogg", "m4a", "opus", "alac", "aiff", "dsd", "pcm")
+_AUDIO_FILES = (
+    "mp3",
+    "flac",
+    "wav",
+    "aac",
+    "ogg",
+    "m4a",
+    "opus",
+    "alac",
+    "aiff",
+    "dsd",
+    "pcm",
+)
 
 _MB_MIN_REQUEST_INTERVAL = 1.0
 _DISCOGS_BURST_LIMIT = 60
@@ -143,7 +155,9 @@ def _http_get_json(
     elif service == "discogs":
         with _discogs_rate_lock:
             if _discogs_request_count >= _DISCOGS_BURST_LIMIT:
-                print(f"Discogs request limit reached. Sleeping for {_DISCOGS_PAUSE_SECONDS} seconds...")
+                print(
+                    f"Discogs request limit reached. Sleeping for {_DISCOGS_PAUSE_SECONDS} seconds..."
+                )
                 time.sleep(_DISCOGS_PAUSE_SECONDS)
                 _discogs_request_count = 0
             _discogs_request_count += 1
@@ -161,6 +175,7 @@ def _http_get_json(
 # ----------------------------
 #       MusicBrainz
 # ----------------------------
+
 
 def _mb_search_recordings(
     song_title: str,
@@ -237,9 +252,7 @@ def _musicbrainz_first_year(
 ) -> Optional[int]:
     want_title_norm = _norm_title(song_title)
     want_artist_norm = _norm_artist(artist)
-    releases = _mb_search_recordings(
-        song_title, artist, limit=25
-    )
+    releases = _mb_search_recordings(song_title, artist, limit=25)
     if not releases:
         file_mode = "album"
         releases = _mb_search_recordings(
@@ -271,10 +284,7 @@ def _musicbrainz_first_year(
 
         # Ensure artist-credit isn't wildly off
         artist_norm = _norm_artist(_mb_release_artist_str(release))
-        if (
-            want_artist_norm not in artist_norm
-            and artist_norm not in want_artist_norm
-        ):
+        if want_artist_norm not in artist_norm and artist_norm not in want_artist_norm:
             continue
         #   if want_artist_norm not in ac_norm and ac_norm not in want_artist_norm:
 
@@ -357,7 +367,11 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
 
         artist_name = item.get("artist") or ""
         artist_norm = _norm_artist(artist_name)
-        if artist_norm and want_artist_norm not in artist_norm and artist_norm not in want_artist_norm:
+        if (
+            artist_norm
+            and want_artist_norm not in artist_norm
+            and artist_norm not in want_artist_norm
+        ):
             continue
 
         year = _extract_year(item.get("year"))
@@ -386,7 +400,9 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str) -> Optiona
 # ----------------------------
 
 
-def first_release_year(artist: str, song_title: str, file_mode: str, mb: bool, dc: bool, wp: bool) -> Optional[int]:
+def first_release_year(
+    artist: str, song_title: str, file_mode: str, mb: bool, dc: bool, wp: bool
+) -> Optional[int]:
     """
     Returns earliest plausible release year found across MusicBrainz + Discogs, with heuristics
     to reduce false positives (covers/live/remasters/etc.). If not found, tries Wikipedia.Returns None if not found.
@@ -419,23 +435,27 @@ def first_release_year(artist: str, song_title: str, file_mode: str, mb: bool, d
 
     years = [year for year in (mb_year, dc_year, wp_year) if isinstance(year, int)]
     if years:
-        print(f"{artist} - {song_title}. Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year}, Wikipedia: {wp_year})")
+        print(
+            f"{artist} - {song_title}. Found years: {years} (MusicBrainz: {mb_year}, Discogs: {dc_year}, Wikipedia: {wp_year})"
+        )
         return min(years)
     else:
         print(f"Could not find a release year for {artist} - {song_title}.")
         return None
 
+
 # ----------------------------
 #       GUI Application
 # ----------------------------
+
 
 class ReleaseYearApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Original Release Year")
         self.root.resizable(False, True)
-        self.root.columnconfigure(0,weight=1)  
-        self.root.rowconfigure(0,weight=1)
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
 
         self.file_mode = tk.StringVar(value="single")
         self.source_mb = tk.BooleanVar(value=False)
@@ -487,7 +507,7 @@ class ReleaseYearApp:
 
         select_menu = tk.Menu(menu_bar, tearoff=False)
         select_menu.add_command(label="File", command=self.open_file)
-        select_menu.add_command(label="Folder",command=self.open_folder)
+        select_menu.add_command(label="Folder", command=self.open_folder)
         menu_bar.add_cascade(label="Open", menu=select_menu)
 
         self.root.config(menu=menu_bar)
@@ -498,7 +518,9 @@ class ReleaseYearApp:
 
         ttk.Label(frame, text="Results:").grid(row=0, column=0, sticky="w", pady=(0, 6))
         scrollbar = tk.Scrollbar(frame, orient="vertical")
-        self.display = tk.Listbox(frame, height=10, width=150, yscrollcommand=scrollbar.set)
+        self.display = tk.Listbox(
+            frame, height=10, width=150, yscrollcommand=scrollbar.set
+        )
         scrollbar.config(command=self.display.yview)
 
         frame.rowconfigure(0, weight=1)
@@ -585,7 +607,7 @@ class ReleaseYearApp:
             filetypes=[("Audio Files", _AUDIO_FILES)],
         )
         if file_path:
-            extension = file_path.split('.')[-1].casefold()
+            extension = file_path.split(".")[-1].casefold()
             if extension in _AUDIO_FILES:
                 self.status_var.set(f"Selected file: {file_path}")
                 metadata = self.get_basic_metadata(file_path)
@@ -609,14 +631,16 @@ class ReleaseYearApp:
             audio_files = []
             for root, _, files in os.walk(directory):
                 for file in files:
-                    if file.split('.')[-1].casefold() in _AUDIO_FILES:
+                    if file.split(".")[-1].casefold() in _AUDIO_FILES:
                         audio_files.append(os.path.join(root, file))
             if not audio_files:
-                messagebox.showinfo("No audio files", "No audio files found in the selected folder.")
+                messagebox.showinfo(
+                    "No audio files", "No audio files found in the selected folder."
+                )
                 self.status_var.set("Ready")
                 return
             self.status_var.set(f"Found {len(audio_files)} audio files. Processing...")
-            albums = {}            
+            albums = {}
             for file_path in audio_files:
                 metadata = self.get_basic_metadata(file_path)
                 if metadata:
@@ -628,13 +652,15 @@ class ReleaseYearApp:
                             song = (artist, song_title, file_path)
                             albums[album].append(song)
             if not albums:
-                messagebox.showinfo("No album data", "No album metadata found in the audio files.")
+                messagebox.showinfo(
+                    "No album data", "No album metadata found in the audio files."
+                )
                 self.status_var.set("Ready")
                 return
             folder_artists = set()
             for album in albums:
                 for song in albums[album]:
-                    folder_artists.add(song[0]) # collect unique artists
+                    folder_artists.add(song[0])  # collect unique artists
             if not folder_artists:
                 self.status_var.set(
                     f"No artist data found for album '{album}'. Skipping."
@@ -650,9 +676,11 @@ class ReleaseYearApp:
                         self.file_mode.set("single")
                         self.lookup_year()
             else:
+                album_file_path = next(iter(albums.values()))[0][2]
                 self.artist_var.set(folder_artists.pop())
                 self.title_var.set(album)
-                self.file_path_var.set(file_path)
+                self.file_path_var.set(album_file_path)
+                self.file_mode.set("album")
                 self.lookup_year()
 
     def lookup_year(self) -> None:
@@ -663,7 +691,7 @@ class ReleaseYearApp:
             messagebox.showerror("Missing data", "Please enter both artist and title.")
             return
 
-        self.status_var.set("Searching MusicBrainz. Discogs and Wikipedia...")
+        self.status_var.set("Searching MusicBrainz, Discogs and Wikipedia...")
         self.result_var.set("Working...")
 
         worker = threading.Thread(
@@ -677,10 +705,27 @@ class ReleaseYearApp:
         self, artist: str, title: str, file_mode: str, file_path: Optional[str] = None
     ) -> None:
         try:
-            year = first_release_year(artist, title, file_mode=file_mode, mb=self.source_mb.get(), dc=self.source_dc.get(), wp=self.source_wp.get())
+            year = first_release_year(
+                artist,
+                title,
+                file_mode=file_mode,
+                mb=self.source_mb.get(),
+                dc=self.source_dc.get(),
+                wp=self.source_wp.get(),
+            )
             metadata_year = None
             if file_path:
-                metadata_year = self._update_file_year_if_earlier(file_path, year)
+                if file_mode == "album":
+                    directory = os.path.dirname(file_path)
+                    for entry in os.listdir(directory):
+                        entry_path = os.path.join(directory, entry)
+                        if (
+                            os.path.isfile(entry_path)
+                            and entry.split(".")[-1].casefold() in _AUDIO_FILES
+                        ):
+                            self._update_file_year_if_earlier(entry_path, year)
+                else:
+                    metadata_year = self._update_file_year_if_earlier(file_path, year)
             self.root.after(
                 0,
                 lambda: self._handle_lookup_success(
@@ -694,7 +739,9 @@ class ReleaseYearApp:
             )
         except Exception as e:
             error_message = str(e)
-            self.root.after(0, lambda: self._handle_lookup_error(error_message=error_message))
+            self.root.after(
+                0, lambda: self._handle_lookup_error(error_message=error_message)
+            )
 
     def _handle_lookup_success(
         self,
@@ -707,9 +754,7 @@ class ReleaseYearApp:
     ) -> None:
         mode_label = "album" if file_mode == "album" else "song"
         if year is None:
-            result =(
-                f'No {mode_label} release year found for "{title}" by {artist}.'
-            )
+            result = f'No {mode_label} release year found for "{title}" by {artist}.'
             self.display.insert(tk.END, result + "\n")
             self.display.itemconfig(tk.END, {"foreground": "red"})
         else:
@@ -719,7 +764,14 @@ class ReleaseYearApp:
             if file_path and metadata_year is not None and year < metadata_year:
                 result += f" Updated file metadata year from {metadata_year} to {year}."
             self.display.insert(tk.END, result + "\n")
-            self.display.itemconfig(tk.END, {"foreground": "green"} if file_path and metadata_year is not None and year < metadata_year else {})
+            self.display.itemconfig(
+                tk.END,
+                (
+                    {"foreground": "green"}
+                    if file_path and metadata_year is not None and year < metadata_year
+                    else {}
+                ),
+            )
         self.result_var.set("Finished! Select a file or folder for a new search.")
         self.status_var.set("Ready!")
 
