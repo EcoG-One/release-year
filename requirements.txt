@@ -2,4 +2,3 @@ requests
 mediafile
 oauth2
 python3-discogs-client
-webbrowser
