@@ -1,24 +1,26 @@
 from __future__ import annotations
 
+# from logging import root
+from logging import root
 from logging import root
 import os
 import re
 import time
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk, filedialog
-from turtle import title
+from tkinter import Entry, messagebox, ttk, filedialog, Label, Button
 from typing import List, Optional
 from mediafile import MediaFile
-from wiki import get_song_release_date
 from musicbrainz import get_first_release_year_mb
 from wikipedia import get_first_release_year_wp
 import requests
+import webbrowser
+import discogs_client
+from discogs_client.exceptions import HTTPError
 
 
-_MB_BASE = "https://musicbrainz.org/ws/2"
 _DISCOGS_BASE = "https://api.discogs.com"
-_DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
+_ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _AUDIO_FILES = (
     "mp3",
@@ -40,6 +42,52 @@ _DISCOGS_PAUSE_SECONDS = 60
 
 _discogs_rate_lock = threading.Lock()
 _discogs_request_count = 0
+
+
+def _read_env_value(key: str) -> Optional[str]:
+    if not os.path.exists(_ENV_PATH):
+        return None
+    with open(_ENV_PATH, "r", encoding="utf-8") as env_file:
+        for raw_line in env_file:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            current_key, value = line.split("=", 1)
+            if current_key.strip() != key:
+                continue
+            return value.strip().strip('"').strip("'")
+    return None
+
+
+def _save_env_value(key: str, value: str) -> None:
+    lines: List[str] = []
+    if os.path.exists(_ENV_PATH):
+        with open(_ENV_PATH, "r", encoding="utf-8") as env_file:
+            lines = env_file.readlines()
+
+    updated = False
+    for index, raw_line in enumerate(lines):
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        current_key = stripped.split("=", 1)[0].strip()
+        if current_key == key:
+            lines[index] = f'{key} = "{value}"\n'
+            updated = True
+            break
+
+    if not updated:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] = f"{lines[-1]}\n"
+        lines.append(f'{key} = "{value}"\n')
+
+    with open(_ENV_PATH, "w", encoding="utf-8") as env_file:
+        env_file.writelines(lines)
+
+    os.environ[key] = value
+
+
+_DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN") or _read_env_value("DISCOGS_TOKEN")
 
 
 # ------------------------------------
@@ -158,10 +206,63 @@ def _http_get_json(
         time.sleep(reset_time + 1)  # Sleep a bit longer to be safe """
     return response.json()
 
+    # ----------------------------
+    #           Discogs
+    # ----------------------------
 
-# ----------------------------
-#           Discogs
-# ----------------------------
+def _discogs_authenticate() -> Optional[str]:
+    consumer_key = os.environ.get("Consumer_Key")
+    consumer_secret = os.environ.get("Consumer_Secret")
+    user_agent = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+    code_var = tk.StringVar()
+    token = None
+
+    def enter_code():
+        nonlocal token
+        oauth_verifier = code_var.get().strip()
+        if not oauth_verifier or oauth_verifier.isspace():
+            auth_window.destroy()
+            messagebox.showerror("Input Error", "Verification code is required for authentication.")
+            return
+        auth_window.destroy()
+        try:
+            access_token, access_secret = discogsclient.get_access_token(oauth_verifier)
+            token = access_token
+            _save_env_value("DISCOGS_TOKEN", access_token)
+        except HTTPError:
+            messagebox.showerror("Authentication Error", "Unable to authenticate.")
+            return
+        # fetch the identity object for the current logged in user.
+
+        user = discogsclient.identity()
+
+        print()
+        print(" == User ==")
+        print(f"    * username           = {user.username}")
+        print(f"    * name               = {user.name}")
+        print(" == Access Token ==")
+        print(f"    * oauth_token        = {access_token}")
+        print(f"    * oauth_token_secret = {access_secret}")
+        print(" Authentication complete. Future requests will be signed with the above tokens.")
+        return token
+
+    # instantiate our discogs_client object.
+    discogsclient = discogs_client.Client(user_agent)
+
+    # prepare the client with our API consumer data.
+    discogsclient.set_consumer_key(consumer_key, consumer_secret)
+    token, secret, url = discogsclient.get_authorize_url()
+    print(" == Request Token == ")
+    if os.environ.get(f"WERKZEUG_RUN_MAIN") is None:
+        webbrowser.open(url)
+    auth_window = tk.Toplevel()
+    auth_window.geometry("400x70")
+    auth_window.title("Discogs Authentication")
+    Label(auth_window, text="Enter Verification code : ").grid(row=0)
+    Entry(auth_window, textvariable = code_var, font=('calibre',10,'normal'), width=20).grid(row=0, column=1)
+    Button(auth_window, text="Enter", command=enter_code).grid(row=1, column=1)
+    auth_window.wait_window()
+    return token
 
 
 def _discogs_search(
@@ -171,8 +272,30 @@ def _discogs_search(
     mb: bool,
 ) -> List[dict]:
     headers = {"User-Agent": _USER_AGENT}
+    global _DISCOGS_TOKEN
     if _DISCOGS_TOKEN:
         headers["Authorization"] = f"Discogs token={_DISCOGS_TOKEN}"
+    else:
+        try:
+            if messagebox.askquestion(
+                "No Discogs token",
+                "You may be subject to very low rate limits. Click YES to set a token for better performance."
+            ) == "yes":
+                _DISCOGS_TOKEN = _discogs_authenticate()
+                if _DISCOGS_TOKEN:
+                    headers["Authorization"] = f"Discogs token={_DISCOGS_TOKEN}"
+                    print(_DISCOGS_TOKEN)
+                else:
+                    _DISCOGS_BURST_LIMIT = 25
+            else:
+                _DISCOGS_BURST_LIMIT = 25
+                messagebox.showwarning(
+                    "Proceeding without token",
+                    "You may be subject to very low rate limits. Consider setting a Discogs token for better performance."
+                )
+        except Exception as e:
+            messagebox.showerror("Authentication Failed", f"Discogs authentication failed: {str(e)}. Proceeding without token.")
+            _DISCOGS_BURST_LIMIT = 25
 
     params = {
         "type": "master" if file_mode == "album" else "release",
@@ -418,6 +541,8 @@ class ReleaseYearApp:
             self.source_label.config(text=f"Current sources: {label}")
         else:
             self.source_label.config(text=f"Current source: {label}")
+
+
 
     def get_basic_metadata(self, file_path):
         song_title = os.path.basename(file_path)
