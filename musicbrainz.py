@@ -33,8 +33,6 @@ _mb_last_request_at = 0.0
 # Minimum Lucene relevance score (0–100) to accept a search hit.
 _MIN_SCORE = 85
 
-# Page size for browse requests (max allowed by MusicBrainz).
-_BROWSE_LIMIT = 100
 # Bracket content that looks like a bad version but is actually
 # MusicBrainz's canonical label for the original studio cut.
 # Only 'album version' and 'single version' qualify; 'mono version',
@@ -277,16 +275,34 @@ def _earliest_canonical_release_year(recording_mbid: str) -> int | None:
     return min(years) if years else None
 
 
+def _recording_search_query(title: str, artist: str) -> str:
+    """
+    Build a recording query that asks the search index for plausible official
+    single/album/EP matches only, so one search can yield the first year.
+    """
+    clean_title = _clean_title(title)
+    query_parts = [
+        f'recording:"{clean_title}"',
+        f'artist:"{artist}"',
+        "status:official",
+        "(primarytype:single OR primarytype:album OR primarytype:ep)",
+    ]
+    query_parts.extend(
+        f'NOT secondarytype:"{secondary}"' for secondary in sorted(_BAD_SECONDARY_TYPES)
+    )
+    return " AND ".join(query_parts)
+
+
 def _first_year_single(title: str, artist: str) -> int | None:
     """
-    Search for recordings (song) and return the earliest canonical release
-    year across all matching recordings.
+    Search for recordings (song) and return the earliest indexed
+    first-release year across all matching canonical recordings.
+
+    This stays to one MusicBrainz request per song by using the search
+    index's `first-release-date` field instead of browsing each recording's
+    releases separately.
     """
-    # Search with the noise-stripped title so that user inputs like
-    # "Standing On The Corner" match MB titles that carry a parenthetical
-    # annotation such as "(from the musical 'The Most Happy Fella')".
-    clean_title = _clean_title(title)
-    query = f'recording:"{clean_title}" AND artist:"{artist}"'
+    query = _recording_search_query(title, artist)
     data = _mb_get("recording", {"query": query, "limit": 25})
 
     years: list[int] = []
@@ -316,12 +332,8 @@ def _first_year_single(title: str, artist: str) -> int | None:
         if not any(_artist_matches(artist, n) for n in names):
             continue
 
-        # 5. Browse all canonical releases for this recording
-        mbid = rec.get("id")
-        if not mbid:
-            continue
-
-        year = _earliest_canonical_release_year(mbid)
+        # 5. Use the indexed first-release date carried on the search hit.
+        year = _parse_year(rec.get("first-release-date"))
         if year:
             years.append(year)
 

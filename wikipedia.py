@@ -9,6 +9,7 @@ No third-party dependencies beyond `requests`.
 """
 
 import re
+import unicodedata
 import requests
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -61,10 +62,11 @@ _DATE_TEMPLATE_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Infobox field names that carry release dates (covers song, album, film)
-_RELEASE_FIELDS = re.compile(
-    r"^\s*\|\s*(?:released?(?:_date)?|release_date\d*|"
-    r"release\d*|published|pub_date|airdate|air_date)\s*=\s*(.+)$",
+# Infobox fields that refer to the commercial release of a recording / album.
+# Deliberately excludes publication / air-date style fields, which can point to
+# composition or broadcast dates instead of the original single/album release.
+_PRIMARY_RELEASE_FIELDS = re.compile(
+    r"^\s*\|\s*(?:released?(?:_date)?|release_date\d*|release\d*)\s*=\s*(.+)$",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -112,8 +114,33 @@ def _clean_title(title: str) -> str:
     return _TITLE_NOISE_RE.sub(" ", title).strip()
 
 
+def _normalize_search_text(text: str) -> str:
+    """Normalise text for punctuation-insensitive article search and scoring."""
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    text = _clean_title(text).casefold()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _titles_match(a: str, b: str) -> bool:
-    return _clean_title(a).casefold() == _clean_title(b).casefold()
+    return _normalize_search_text(a) == _normalize_search_text(b)
+
+
+def _normalize_artist(name: str) -> str:
+    """Normalise an artist name for fuzzy comparison."""
+    s = name.casefold()
+    s = re.sub(r"\b(the|a|an)\b", "", s)
+    s = re.sub(r"[&+]", "and", s)
+    s = re.sub(r"[^\w\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _artist_matches(query_artist: str, page_artist: str) -> bool:
+    """Return True when the Wikipedia page artist matches the requested artist."""
+    q = _normalize_artist(query_artist)
+    p = _normalize_artist(page_artist)
+    return bool(q and p and (q == p or q in p or p in q))
 
 
 def _bracketed_parts_are_bad(text: str) -> bool:
@@ -154,6 +181,109 @@ def _years_from_date_templates(text: str) -> list[int]:
             except ValueError:
                 pass
     return years
+
+
+def _clean_wikitext(text: str) -> str:
+    """Reduce basic Wikipedia markup to comparable plain text."""
+    if not text:
+        return ""
+    s = re.sub(r"<ref[^>]*>.*?</ref>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    s = re.sub(r"<ref[^/]*/>", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = re.sub(r"\[\[([^|\]]*\|)?([^\]]+)\]\]", lambda m: m.group(2), s)
+
+    def _template_repl(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        if not inner:
+            return ""
+        parts = [part.strip() for part in inner.split("|")]
+        name = parts[0].casefold()
+        if name in {
+            "plainlist",
+            "hlist",
+            "ubl",
+            "unbulleted list",
+            "flatlist",
+            "nowrap",
+            "small",
+            "nobold",
+        }:
+            return " ".join(parts[1:])
+        return ""
+
+    s = re.sub(r"\{\{([^{}]*)\}\}", _template_repl, s)
+    s = re.sub(r"'{2,}", "", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _extract_infobox(wikitext: str) -> str | None:
+    """Extract the first infobox template block from raw article wikitext."""
+    match = re.search(r"\{\{\s*Infobox\b", wikitext, flags=re.IGNORECASE)
+    if not match:
+        return None
+
+    start = match.start()
+    depth = 0
+    i = start
+    while i < len(wikitext) - 1:
+        token = wikitext[i : i + 2]
+        if token == "{{":
+            depth += 1
+            i += 2
+            continue
+        if token == "}}":
+            depth -= 1
+            i += 2
+            if depth == 0:
+                return wikitext[start:i]
+            continue
+        i += 1
+    return None
+
+
+def _extract_infobox_field_values(wikitext: str, field_names: set[str]) -> list[str]:
+    """Extract raw field values for the given infobox keys."""
+    infobox = _extract_infobox(wikitext)
+    if not infobox:
+        return []
+
+    values: list[str] = []
+    current_key: str | None = None
+    current_lines: list[str] = []
+
+    def _commit() -> None:
+        if current_key and current_key.casefold() in field_names:
+            value = _clean_wikitext("\n".join(current_lines).strip())
+            if value:
+                values.append(value)
+
+    for line in infobox.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            _commit()
+            parts = stripped[1:].split("=", 1)
+            current_key = parts[0].strip()
+            current_lines = [parts[1].strip()] if len(parts) > 1 else [""]
+        elif current_key:
+            current_lines.append(stripped)
+    _commit()
+
+    return values
+
+
+def _article_matches_artist(wikitext: str, artist: str) -> bool:
+    """Verify the infobox artist/performer matches the requested artist."""
+    artist_fields = {
+        "artist",
+        "artists",
+        "performer",
+        "performers",
+        "album artist",
+        "album_artist",
+    }
+    page_artists = _extract_infobox_field_values(wikitext, artist_fields)
+    return any(_artist_matches(artist, page_artist) for page_artist in page_artists)
 
 
 # ── Wikipedia API ─────────────────────────────────────────────────────────────
@@ -279,7 +409,7 @@ def _extract_years_from_infobox(wikitext: str) -> list[int]:
     """
     years: list[int] = []
 
-    for m in _RELEASE_FIELDS.finditer(wikitext):
+    for m in _PRIMARY_RELEASE_FIELDS.finditer(wikitext):
         field_val = m.group(1).strip()
 
         # Skip field values whose bracketed content flags a bad variant
@@ -325,17 +455,27 @@ def _score_candidate(result: dict, title: str, artist: str, title_type: str) -> 
     art_title = result.get("title", "")
     snippet = result.get("snippet", "").lower()
     art_lower = art_title.lower()
-    query_clean = _clean_title(title).casefold()
+    query_clean = _normalize_search_text(title)
+    article_title_clean = _normalize_search_text(art_title)
 
     # Hard reject: obviously bad article
     if _BAD_ARTICLE_RE.search(art_title):
         return -1.0
 
+    if not query_clean:
+        return -1.0
+
     score = 0.0
 
     # Title match in article name
-    if query_clean in art_lower:
+    if query_clean == article_title_clean:
+        score += 5.0
+    elif query_clean in article_title_clean or article_title_clean in query_clean:
         score += 3.0
+    elif query_clean in _normalize_search_text(snippet):
+        score += 1.0
+    else:
+        return -1.0
     # Artist name in article name or snippet
     if artist.casefold() in art_lower or artist.casefold() in snippet:
         score += 2.0
@@ -352,15 +492,17 @@ def _find_best_article(title: str, artist: str, title_type: str) -> str | None:
     Search Wikipedia and return the title of the most relevant article, or
     None if nothing credible is found.
     """
+    search_title = _clean_title(title).strip(" .,!?:;\"'")
+
     # Try a specific query first
     for query in [
-        f"{title} {artist} {title_type}",
+        f"{search_title} {artist} {title_type}",
         (
-            f"{title} {artist} song"
+            f"{search_title} {artist} song"
             if title_type == "single"
-            else f"{title} {artist} album"
+            else f"{search_title} {artist} album"
         ),
-        f"{title} {artist}",
+        f"{search_title} {artist}",
     ]:
         results = _search_articles(query, limit=10)
         if not results:
@@ -371,9 +513,12 @@ def _find_best_article(title: str, artist: str, title_type: str) -> str | None:
         if not scored:
             continue
 
-        best_result, best_score = max(scored, key=lambda x: x[1])
-        if best_score > 0:
-            return best_result["title"]
+        for result, score in sorted(scored, key=lambda x: x[1], reverse=True):
+            if score <= 0:
+                continue
+            wikitext = _get_wikitext(result["title"])
+            if wikitext and _article_matches_artist(wikitext, artist):
+                return result["title"]
 
     return None
 
@@ -442,6 +587,7 @@ def get_first_release_year_wp(title: str, artist: str, title_type: str) -> int |
 
 if __name__ == "__main__":
     tests = [
+        ("Que Sera, Sera.", "Doris Day", "single", 1956),
         ("Bohemian Rhapsody", "Queen", "single", 1975),
         ("A Night at the Opera", "Queen", "album", 1975),
         ("Smells Like Teen Spirit", "Nirvana", "single", 1991),

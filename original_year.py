@@ -20,6 +20,8 @@ from discogs_client.exceptions import HTTPError
 
 
 _DISCOGS_BASE = "https://api.discogs.com"
+_DISCOGS_TOKEN = os.environ.get("DISCOGS_TOKEN")
+_USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _ENV_PATH = os.path.join(os.path.dirname(__file__), ".env")
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _AUDIO_FILES = (
@@ -102,7 +104,7 @@ _BAD_VERSION_RE = re.compile(
         live|remaster(?:ed)?|demo|karaoke|tribute|cover|instrumental|
         remix|mix|edit|radio\s*edit|extended|mono|stereo|acoustic|
         session|bbc|peel|alternate|outtake|version|re-record(?:ed|ing)?|
-        anniversary|deluxe|bonus|reissue|speed\s*up|slowed|nightcore
+        anniversary|deluxe|bonus|reissue|speed\s*up|slowed|nightcore|edition
     )\b
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -491,6 +493,11 @@ class ReleaseYearApp:
 
         self.root.config(menu=menu_bar)
 
+        help_menu = tk.Menu(menu_bar, tearoff=False)
+        help_menu.add_command(label="Instructions", command=self.show_instructions)
+        help_menu.add_command(label="About", command=self.show_about)
+        menu_bar.add_cascade(label="Help", menu=help_menu)
+
     def _build_layout(self) -> None:
         frame = ttk.Frame(self.root, padding=16)
         frame.grid(row=0, column=0, sticky="new")
@@ -541,8 +548,6 @@ class ReleaseYearApp:
             self.source_label.config(text=f"Current sources: {label}")
         else:
             self.source_label.config(text=f"Current source: {label}")
-
-
 
     def get_basic_metadata(self, file_path):
         song_title = os.path.basename(file_path)
@@ -793,6 +798,23 @@ class ReleaseYearApp:
     def _handle_lookup_error(self, error_message: str) -> None:
         self.result_var.set("Lookup failed.")
         self.status_var.set(error_message or "An unexpected error occurred.")
+
+    def show_instructions(self) -> None:
+        messagebox.showinfo(
+            "Instructions for Original Release Year Lookup",
+            "1. Use the 'Open' menu to select an audio file or a folder containing audio files. Supported formats include MP3, FLAC, WAV, AAC, OGG, M4A, OPUS, ALAC, AIFF, DSD, and PCM.\n\n"
+            "2. Choose whether you want to look up release years for singles or albums using the 'Mode' menu.\n\n"
+            "3. Select which sources to search (MusicBrainz, Discogs, Wikipedia) from the 'Source' menu. More sources may yield better results but can take longer. MusicBrainz is veeeeery slow. Default is Discogs, which is lightning fast.\n\n"
+            "4. The application will display the found release year(s) in the results area. If an earlier release year is found than what's currently in your file's metadata, it will update the file and indicate this in the results.\n\n"
+            "5. You can repeat this process with different files or folders as needed."
+        )
+
+    def show_about(self) -> None:
+        messagebox.showinfo(
+            "About Original Release Year Lookup",
+            "Original Release Year Lookup v1.0 Beta\n\n"
+            "This application helps you find the original release year of a song or album using MusicBrainz, Discogs, and Wikipedia. It can also update the metadata of your audio files if an earlier release year is found.\n\n"
+            "Developed by EcoG (https://github.com/EcoG-One)")
 
 
 def main() -> None:
