@@ -18,3 +18,11 @@ build/release_year/localpycs/pyimod03_ctypes.pyc
 build/release_year/localpycs/pyimod04_pywin32.pyc
 build/release_year/localpycs/struct.pyc
 dist/release_year.exe
+auth.py
+config.py
+discogs_cl.py
+settings.py
+.gitignore
+__pycache__/discogs_client.cpython-314.pyc
+__pycache__/config.cpython-314.pyc
+__pycache__/original_year.cpython-314.pyc
