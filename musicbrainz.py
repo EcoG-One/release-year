@@ -22,7 +22,7 @@ _MB_ROOT = "https://musicbrainz.org/ws/2/"
 _AUTH = HTTPDigestAuth("EcoG", "3rfweqf345)^")
 
 # MusicBrainz recommends ≤1 request/second for authenticated clients.
-_REQUEST_DELAY = 1.1  # seconds inserted before every request
+_REQUEST_DELAY = 1.4  # seconds inserted before every request
 _RETRY_STATUSES = {429, 502, 503, 504}
 _MAX_RETRIES = 5
 _BACKOFF_BASE = 2.0  # seconds; doubles on each retry (2 → 4 → 8 → 16 …)

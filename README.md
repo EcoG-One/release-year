@@ -82,7 +82,7 @@ If no saved Discogs token is available and Discogs is enabled:
 
 1. The app opens the Discogs authorization page in your browser.
 2. You paste the verification code into the Tkinter dialog.
-3. The returned token is saved to `.env`.
+3. The returned token is saved in users folder in `.FirstReleaseYear//.env`.
 
 On the next run, the saved token is loaded automatically, so the authorization step does not need to be repeated.
 

@@ -19,7 +19,6 @@ from oauthlib import oauth1
 
 
 _DISCOGS_BASE = "https://api.discogs.com"
-_USER_AGENT = "FirstReleaseYearLookup/2.0beta (contact: ecog@outlook.de)"
 _TKN_PATH = Path.home() / ".FirstReleaseYear" / ".env"
 _USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
 _AUDIO_FILES = (
@@ -36,8 +35,18 @@ _AUDIO_FILES = (
     "pcm",
 )
 
-_DISCOGS_BURST_LIMIT = 60
+_DISCOGS_BURST_LIMIT = 50
 _DISCOGS_PAUSE_SECONDS = 60
+
+# Cross-worker MusicBrainz rate limit. MusicBrainz's own module also
+# sleeps _REQUEST_DELAY between requests, but that only protects requests
+# within a single worker. When several worker threads run concurrently
+# (e.g. compilation folder mode) they would otherwise fire MB requests
+# back-to-back. This lock + timestamp enforces a global 1.1s gap between
+# MusicBrainz calls regardless of which worker makes them.
+_MB_REQUEST_DELAY = 1.1
+_mb_rate_lock = threading.Lock()
+_mb_last_request_at = 0.0
 
 
 _discogs_rate_lock = threading.Lock()
@@ -147,9 +156,33 @@ def _norm_artist(value: str) -> str:
     return value
 
 
+_NOISE_PAREN_RE = re.compile(
+    r"""
+    \s*[\(\[\{]\s*                # opening bracket
+    [^()\[\]\{\}]*?               # contents (no nested brackets)
+    \b(
+        version|
+        remaster(?:ed)?|
+        remix|
+        radio\s*edit|
+        extended|
+        mono|
+        stereo|
+        deluxe|
+        bonus|
+        reissue
+    )\b
+    [^()\[\]\{\}]*?
+    \s*[\)\]\}]\s*                 # closing bracket
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
 def _norm_title(value: str) -> str:
     value = value.strip().lower()
-    value = _TITLE_NOISE_RE.sub(" ", value)  # drop parenthetical qualifiers
+    value = _NOISE_PAREN_RE.sub(" ", value)  # drop parenthetical noise qualifiers
+    value = _TITLE_NOISE_RE.sub(" ", value)  # drop remaining parenthetical qualifiers
     value = value.replace("&", "and")
     value = re.sub(r"[’']", "", value)  # normalize apostrophes away (I'm -> Im)
     value = re.sub(
@@ -182,6 +215,22 @@ def _coerce_media_year(value: object) -> Optional[int]:
             if year is not None:
                 return year
     return _extract_year(str(value))
+
+
+def _wait_for_mb_slot() -> None:
+    """
+    Block the calling thread until at least _MB_REQUEST_DELAY seconds have
+    elapsed since the last MusicBrainz call started. Multiple worker
+    threads calling this serially will be released one at a time with the
+    configured gap between them.
+    """
+    global _mb_last_request_at
+    with _mb_rate_lock:
+        now = time.monotonic()
+        wait = _MB_REQUEST_DELAY - (now - _mb_last_request_at)
+        if wait > 0:
+            time.sleep(wait)
+        _mb_last_request_at = time.monotonic()
 
 
 def _http_get_json(
@@ -255,11 +304,11 @@ def _http_get_json(
     #           Discogs
     # ----------------------------
 
-def _discogs_authenticate() -> Optional[str]:
+def _discogs_authenticate() -> Optional[tuple]:
     try:
         consumer_key = os.environ.get("Consumer_Key")
         consumer_secret = os.environ.get("Consumer_Secret")
-        user_agent = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+        user_agent = _USER_AGENT
         code_var = tk.StringVar()
         token = None
     except KeyError as e:
@@ -267,7 +316,7 @@ def _discogs_authenticate() -> Optional[str]:
         return None
 
     def enter_code():
-        nonlocal token
+        nonlocal token, secret
         oauth_verifier = code_var.get().strip()
         if not oauth_verifier or oauth_verifier.isspace():
             auth_window.destroy()
@@ -325,31 +374,6 @@ def _discogs_search(
     mb: bool,
 ) -> List[dict]:
     headers = {"User-Agent": _USER_AGENT, "Accept": "application/json"}
-    global _DISCOGS_TOKEN
-    global _DISCOGS_SECRET
-    if not (_DISCOGS_TOKEN and _DISCOGS_SECRET):
-        try:
-            if (
-                messagebox.askquestion(
-                    "No Discogs Authorization",
-                    "You may be subject to very low rate limits. " \
-                    "Click YES to Authorize in Discogs for better performance.")
-                == "yes"):
-                _DISCOGS_TOKEN, _DISCOGS_SECRET = _discogs_authenticate()
-                if _DISCOGS_TOKEN and _DISCOGS_SECRET:
-                    pass
-                else:
-                    _DISCOGS_BURST_LIMIT = 25
-            else:
-                _DISCOGS_BURST_LIMIT = 25
-                messagebox.showwarning(
-                    "Proceeding without token",
-                    "You may be subject to very low rate limits. Consider setting a Discogs token for better performance."
-                )
-        except Exception as e:
-            messagebox.showerror("Authentication Failed", f"Discogs authentication failed: {str(e)}. Proceeding without token.")
-            _DISCOGS_BURST_LIMIT = 25
-
     params = {
         "type": "master" if file_mode == "album" else "release",
         "artist": _norm_artist(artist),
@@ -369,7 +393,7 @@ def _discogs_search(
     return data.get("results") or []
 
 
-def _discogs_release_is_bad(release: dict) -> bool:
+def _discogs_release_is_bad(release: dict) -> bool: 
     # Skip unofficial; prefer avoiding compilations when possible, but some original releases
     #  are compilations so only filter those if explicitly tagged as such via secondary type or status
     if (release.get("status") or "").lower() in _BAD_SECONDARY_TYPES:
@@ -390,7 +414,14 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str, mb: bool) 
     #  the earliest year among those that look good
     for item in results:
         if _discogs_release_is_bad(item):
-            continue
+            if (
+                (item.get("status") or "").lower() == "compilation"
+                or str(format).lower() == "compilation"
+                for format in item.get("format") or []
+            ) and file_mode == "album":
+                file_mode = "single"
+            else:
+                continue
 
         if file_mode == "album":
             title_norm = _norm_title(item.get("title") or "")
@@ -422,7 +453,7 @@ def _discogs_first_year(song_title: str, artist: str, file_mode: str, mb: bool) 
             years.append(year)
 
     if file_mode == "single" and not years:
-        _discogs_first_year(song_title, artist, file_mode="album", mb=mb)
+        return _discogs_first_year(song_title, artist, file_mode="album", mb=mb)
 
     return min(years) if years else None
 
@@ -501,6 +532,7 @@ class ReleaseYearApp:
 
         self._build_menu()
         self._build_layout()
+        self.check_discogs_token()
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self.root)
@@ -600,6 +632,36 @@ class ReleaseYearApp:
         else:
             self.source_label.config(text=f"Current source: {label}")
 
+    def check_discogs_token(self) -> None:
+        global _DISCOGS_TOKEN, _DISCOGS_SECRET, _DISCOGS_BURST_LIMIT
+        if not (_DISCOGS_TOKEN and _DISCOGS_SECRET):
+            try:
+                if (
+                    messagebox.askquestion(
+                        "No Discogs Authorization",
+                        "You may be subject to very low rate limits. "
+                        "Click YES to Authorize in Discogs for better performance.",
+                    )
+                    == "yes"
+                ):
+                    _DISCOGS_TOKEN, _DISCOGS_SECRET = _discogs_authenticate()
+                    if _DISCOGS_TOKEN and _DISCOGS_SECRET:
+                        pass
+                    else:
+                        _DISCOGS_BURST_LIMIT = 25
+                else:
+                    _DISCOGS_BURST_LIMIT = 25
+                    messagebox.showwarning(
+                        "Proceeding without token",
+                        "You may be subject to very low rate limits. Consider setting a Discogs token for better performance.",
+                    )
+            except Exception as e:
+                messagebox.showerror(
+                    "Authentication Failed",
+                    f"Discogs authentication failed: {str(e)}. Proceeding without token.",
+                )
+                _DISCOGS_BURST_LIMIT = 25
+
     def get_basic_metadata(self, file_path):
         song_title = os.path.basename(file_path)
         artist = "Unknown Artist"
@@ -607,7 +669,7 @@ class ReleaseYearApp:
         try:
             file = MediaFile(file_path)
             if file is None:
-                self.status_var.showMessage(
+                self.status_var.set(
                     f"Could not read audio file: {file_path}. Make sure the file exists."
                 )
                 return None
@@ -618,7 +680,7 @@ class ReleaseYearApp:
             album = file.album
 
         except Exception as e:
-            self.status_var.showMessage(
+            self.status_var.set(
                 f"Error extracting metadata from {file_path}: {str(e)}"
             )
 
@@ -656,6 +718,8 @@ class ReleaseYearApp:
                     self.lookup_year()
                     self.result_var.set("Finished! Select a file or folder for a new search.")
                     self.status_var.set("Ready!")
+                else:
+                    self.status_var.set(f"Could not extract metadata from file: {file_path}")
         else:
             self.status_var.set("No file selected.")
 
@@ -681,61 +745,84 @@ class ReleaseYearApp:
                 return
             self.status_var.set(f"Found {len(audio_files)} audio files. Processing...")
             albums = {}
+            songs: List[tuple] = []
             for file_path in audio_files:
                 metadata = self.get_basic_metadata(file_path)
                 if metadata:
                     artist, song_title, album = metadata
-                    if album:
-                        if album not in albums:
-                            albums[album] = [(artist, song_title, file_path)]
-                        else:
-                            song = (artist, song_title, file_path)
-                            albums[album].append(song)
-            if not albums:
-                messagebox.showinfo(
-                    "No album data", "No album metadata found in the audio files."
-                )
-                self.status_var.set("Ready")
-                return
-            folder_artists = set()
-            for album in albums:
-                for song in albums[album]:
-                    folder_artists.add(song[0])  # collect unique artists
-            if not folder_artists:
-                self.status_var.set(
-                    f"No artist data found for album '{album}'. Skipping."
-                )
-                return
-            if len(folder_artists) > 1:
-                self.status_var.set(f"Multiple artists found")
+                    if self.file_mode.get() == "single":
+                        songs.append((artist, song_title, file_path))
+                    else:
+                        if album:
+                            if album not in albums:
+                                albums[album] = [(artist, song_title, file_path)]
+                            else:
+                                song = (artist, song_title, file_path)
+                                albums[album].append(song)
+                else:
+                    self.status_var.set(
+                        f"Skipping file with unreadable metadata: {file_path}"
+                    )
+            if self.file_mode.get() == "album":
+                if not albums:
+                    messagebox.showinfo(
+                        "No album data", "No album metadata found in the audio files."
+                    )
+                    self.status_var.set("Ready")
+                    return
+                folder_artists = set()
                 for album in albums:
                     for song in albums[album]:
-                        self.artist_var.set(song[0])
-                        self.title_var.set(song[1])
-                        self.file_path_var.set(song[2])
-                        self.file_mode.set("single")
-                        if self.source_mb.get():
-                            try:
-                                print("Searching MusicBrainz...")
-                                self._lookup_year_worker(
-                                    song[0],
-                                    song[1],
-                                    "single",
-                                    song[2],
-                                )
-                            except requests.RequestException:
-                                mb_year = None
-                        else:
-                            self.lookup_year()
-            else:
-                album_file_path = next(iter(albums.values()))[0][2]
-                self.artist_var.set(folder_artists.pop())
-                self.title_var.set(album)
-                self.file_path_var.set(album_file_path)
-                self.file_mode.set("album")
-                self.lookup_year()
-        self.result_var.set("Finished! Select a file or folder for a new search.")
-        self.status_var.set("Ready!")
+                        folder_artists.add(song[0])  # collect unique artists
+                if not folder_artists:
+                    self.status_var.set(
+                        f"No artist data found for album '{album}'. Skipping."
+                    )
+                    return
+                if (
+                    len(folder_artists) > 1
+                    or (len(folder_artists) == 1 and ("Various Artists" in folder_artists or "Various" in folder_artists))
+                ):
+                    self.status_var.set(f"Compilation found")
+                    # Build a flat list of (artist, song_title, file_path) tuples
+                    # so we can spawn a thread per song and wait for all of them.
+
+                    for album_name in albums:
+                        for song in albums[album_name]:
+                            songs.append(song)
+                else:
+                    album_file_path = next(iter(albums.values()))[0][2]
+                    self.artist_var.set(folder_artists.pop())
+                    self.title_var.set(album)
+                    self.file_path_var.set(album_file_path)
+                    self.file_mode.set("album")
+                    self.lookup_year()
+                    return
+
+            threads: List[threading.Thread] = []
+            for song in songs:
+                worker = threading.Thread(
+                    target=self._lookup_year_worker,
+                    args=(song[0], song[1], "single", song[2]),
+                    daemon=True,
+                )
+                threads.append(worker)
+                worker.start()
+
+            def _await_compilation_finish() -> None:
+                for t in threads:
+                    t.join()
+                self.root.after(
+                    0,
+                    lambda: (
+                        self.result_var.set(
+                            "Finished! Select a file or folder for a new search."
+                        ),
+                        self.status_var.set("Ready!"),
+                    ),
+                )
+
+            threading.Thread(target=_await_compilation_finish, daemon=True).start()
 
     def lookup_year(self) -> None:
         artist = self.artist_var.get().strip()
@@ -762,7 +849,8 @@ class ReleaseYearApp:
             dc=self.source_dc.get()
             wp=self.source_wp.get()
             file_mode=file_mode
-            if mb: 
+            if mb:
+                _wait_for_mb_slot()
                 mb_year = get_first_release_year_mb(
                     title,
                     artist,
@@ -828,6 +916,7 @@ class ReleaseYearApp:
         mode_label = "album" if file_mode == "album" else "song"
         if year is None:
             result = f'No {mode_label} release year found for "{title}" by {artist}.'
+            self.display.see(tk.END)
             self.display.insert(tk.END, result + "\n")
             self.display.itemconfig(tk.END, {"foreground": "red"})
         else:
@@ -836,6 +925,7 @@ class ReleaseYearApp:
             )
             if file_path and metadata_year is not None and year < metadata_year:
                 result += f" Updated file metadata year from {metadata_year} to {year}."
+            self.display.see(tk.END)
             self.display.insert(tk.END, result + "\n")
             self.display.itemconfig(
                 tk.END,
@@ -849,6 +939,23 @@ class ReleaseYearApp:
     def _handle_lookup_error(self, error_message: str) -> None:
         self.result_var.set("Lookup failed.")
         self.status_var.set(error_message or "An unexpected error occurred.")
+
+    def Success(self, artist: str, title: str, file_mode: str, year: Optional[int]) -> None:
+        mode_label = "album" if file_mode == "album" else "song"
+        if year is None:
+            result = f'No {mode_label} release year found for "{title}" by {artist}.'
+            self.display.see(tk.END)
+            self.display.insert(tk.END, result + "\n")
+            self.display.itemconfig(tk.END, {"foreground": "red"})
+        else:
+            result = (
+                f'For {mode_label} "{title}" by {artist} found release year: {year}.'
+            )
+            self.display.see(tk.END)
+            self.display.insert(tk.END, result + "\n")
+            self.display.itemconfig(tk.END, {"foreground": "green"})
+            self.result_var.set("Finished! Select a file or folder for a new search.")
+            self.status_var.set("Ready!")
 
     def show_instructions(self) -> None:
         messagebox.showinfo(
