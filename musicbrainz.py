@@ -22,10 +22,11 @@ _MB_ROOT = "https://musicbrainz.org/ws/2/"
 _AUTH = HTTPDigestAuth("EcoG", "3rfweqf345)^")
 
 # MusicBrainz recommends ≤1 request/second for authenticated clients.
-_REQUEST_DELAY = 1.4  # seconds inserted before every request
+_REQUEST_DELAY = 1.2  # seconds inserted before every request
 _RETRY_STATUSES = {429, 502, 503, 504}
-_MAX_RETRIES = 5
+_MAX_RETRIES = 3
 _BACKOFF_BASE = 2.0  # seconds; doubles on each retry (2 → 4 → 8 → 16 …)
+_BROWSE_LIMIT = 25  # max items per page for browse requests; pagination via offset is required for popular songs
 
 _mb_rate_lock = threading.Lock()
 _mb_last_request_at = 0.0
@@ -58,6 +59,28 @@ _TITLE_NOISE_RE = re.compile(
     r"\s*[\(\[\{].*?[\)\]\}]\s*"
 )  # remove (...) / [...] / {...} parts
 
+_NOISE_PAREN_RE = re.compile(
+    r"""
+    \s*[\(\[\{]\s*                # opening bracket
+    [^()\[\]\{\}]*?               # contents (no nested brackets)
+    \b(
+        version|
+        remaster(?:ed)?|
+        remix|
+        radio\s*edit|
+        extended|
+        mono|
+        stereo|
+        deluxe|
+        bonus|
+        reissue
+    )\b
+    [^()\[\]\{\}]*?
+    \s*[\)\]\}]\s*                 # closing bracket
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 _BAD_SECONDARY_TYPES = {
     "compilation",
     "live",
@@ -78,9 +101,18 @@ _BAD_SECONDARY_TYPES = {
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _clean_title(title: str) -> str:
+def _clean_title(value: str) -> str:
     """Strip bracketed noise tokens, then collapse whitespace."""
-    return _TITLE_NOISE_RE.sub(" ", title).strip()
+    value = value.strip().lower()
+    value = _NOISE_PAREN_RE.sub(" ", value)  # drop parenthetical noise qualifiers
+    value = _TITLE_NOISE_RE.sub(" ", value)  # drop remaining parenthetical qualifiers
+    value = value.replace("&", "and")
+    value = re.sub(r"[’']", "", value)  # normalize apostrophes away (I'm -> Im)
+    value = re.sub(
+        r"[^\w\s]", " ", value
+    )  # punctuation -> space (What's Up? -> Whats Up)
+    value = re.sub(r"\s+", " ", value).strip()
+    return value
 
 
 def _bracketed_parts_are_bad(raw_title: str) -> bool:
@@ -163,6 +195,9 @@ def _mb_get(endpoint: str, params: dict) -> dict:
         if response.status_code not in _RETRY_STATUSES:
             response.raise_for_status()
             return response.json()
+        else:
+            print(f"[MusicBrainz] Received HTTP {response.status_code} on attempt "
+                  f"{attempt + 1}/{_MAX_RETRIES} for {endpoint} with params {params!r}")
 
         if attempt == _MAX_RETRIES - 1:
             response.raise_for_status()

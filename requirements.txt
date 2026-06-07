@@ -2,3 +2,4 @@ requests
 mediafile
 oauth2
 python3-discogs-client
+musicbrainzngs>=0.7.1

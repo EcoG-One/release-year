@@ -582,3 +582,153 @@
   - auth_window = tk.Toplevel() without a parent (can hide behind main window on some WMs)
   - try/except requests.RequestException in first_release_year is too narrow — any non-RequestException (KeyError on
   malformed JSON, AttributeError on missing fields) crashes the worker
+  
+  in original_year.py, in def _norm_title, if the following “noise” tokens are in parenthesis in the title, remove the parenthesis and everything inside it: Version, remaster(?:ed)?, remix, radio\s*edit, extended, mono, stereo, deluxe, bonus, reissue
+  
+  
+  ❯ create a python script that inputs the artist and title of a song or an album and returns a dictionary with the
+  song's metadata, - or all album song's metadata if the input is an album. The script must search for the metadata in
+  the Musicbrainz API using the musicbrainzngs module. The script must also have a fynction that returns every song's
+  'recordins' the minimum ['first-release-date']. The script must avoid Keywords that often indicate non-original / non-studio / non-canonical variants and strip from the titles common “noise” tokens for robust matching. 
+  When looking for 'first-release-date' the script must avoid secondary types like: "compilation",
+    "live",
+    "remix",
+    "dj-mix",
+    "demo",
+    "bootleg",
+    "promotional",
+    "promo",
+    "interview",
+    "audiobook",
+    "audio drama",
+    "spokenword",
+    "field recording",
+    "unofficial"
+	Between requests to the Musicbrainz API must be inserted a DELAY of 1.2 seconds. If the responce status is one of 429, 502, 503, 504, the script must retry after 2 seconds a number of _MAX_RETRIES = 3
+	the USER AGENT is "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+	the Musicbrainz API ROOT is "https://musicbrainz.org/ws/2/" and for authentication use _AUTH = HTTPDigestAuth("EcoG", "3rfweqf345)^")
+	
+	**Vibe Coding Prompt**
+
+Build a production-quality Python module that accepts an **artist name** and either a **song title** or an **album title**, then queries the **MusicBrainz API** using the `musicbrainzngs` library and returns structured metadata.
+
+### Core Requirements
+
+* Create a function that accepts:
+
+  * `artist`
+  * `title`
+  * `type` (`"track"` or `"album"`)
+
+* If the input is a **track**, return a dictionary containing the song's metadata.
+
+* If the input is an **album**, return a dictionary containing:
+
+  * Album metadata
+  * Metadata for every track on the album
+
+### First Release Date Resolution
+
+Implement a dedicated function that determines the **earliest valid release date** for a song by examining all available MusicBrainz recordings and releases.
+
+The function should:
+
+1. Retrieve all relevant recordings associated with the song.
+2. Collect available `first-release-date` values.
+3. Return the earliest valid date found.
+4. Prefer canonical studio releases whenever possible.
+
+### Matching and Normalization
+
+Implement robust title matching:
+
+* Remove common "noise" tokens from titles before comparison.
+* Ignore keywords that frequently indicate non-original, non-studio, or alternate versions.
+* Normalize punctuation, whitespace, capitalization, and bracketed suffixes.
+* Improve matching accuracy by comparing cleaned titles.
+
+Examples of variants to ignore:
+
+* Live
+* Acoustic
+* Demo
+* Remix
+* Radio Edit
+* Extended Mix
+* Instrumental
+* Karaoke
+* Remastered
+* Anniversary Edition
+* Deluxe Edition
+* Bonus Track
+
+### Release Filtering
+
+When determining a song's original release date, exclude releases whose secondary types contain any of the following:
+
+```python
+{
+    "compilation",
+    "live",
+    "remix",
+    "dj-mix",
+    "demo",
+    "bootleg",
+    "promotional",
+    "promo",
+    "interview",
+    "audiobook",
+    "audio drama",
+    "spokenword",
+    "field recording",
+    "unofficial"
+}
+```
+
+Only use releases that represent the most canonical/original release history of the recording.
+
+### MusicBrainz API Configuration
+
+Use the following configuration:
+
+```python
+USER_AGENT = "FirstReleaseYearLookup/2.0 (contact: ecog@outlook.de)"
+API_ROOT = "https://musicbrainz.org/ws/2/"
+```
+
+### Rate Limiting and Reliability
+
+Implement a resilient request layer:
+
+* Insert a delay of **1.2 seconds** between all MusicBrainz API requests.
+* Retry failed requests when the HTTP status code is:
+
+```python
+{429, 502, 503, 504}
+```
+
+Retry policy:
+
+```python
+_MAX_RETRIES = 3
+RETRY_DELAY = 2.0
+```
+
+Behavior:
+
+* Wait 2 seconds before each retry.
+* Stop after 3 failed attempts.
+* Log retry attempts and final failures.
+
+### Code Quality
+
+* Use type hints throughout.
+* Use dataclasses where appropriate.
+* Add detailed docstrings.
+* Implement structured logging.
+* Separate API access, matching logic, release filtering, and metadata extraction into independent functions/classes.
+* Return clean, well-documented dictionaries suitable for JSON serialization.
+* Include example usage demonstrating both song and album lookups.
+* Ensure the implementation is maintainable, fault-tolerant, and ready for integration into larger applications.
+
+	

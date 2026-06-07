@@ -16,7 +16,7 @@ import webbrowser
 import discogs_client
 from discogs_client.exceptions import HTTPError
 from oauthlib import oauth1
-
+from musicbrainz_metadata import lookup_musicbrainz
 
 _DISCOGS_BASE = "https://api.discogs.com"
 _TKN_PATH = Path.home() / ".FirstReleaseYear" / ".env"
@@ -151,7 +151,7 @@ _BAD_SECONDARY_TYPES = {
 def _norm_artist(value: str) -> str:
     value = value.strip().lower()
     value = re.sub(r"^the\s+", "", value)  # treat "The Beach Boys" ~ "Beach Boys"
-    value = re.sub(r"[^\w\s]", "", value)  # drop punctuation
+    #value = re.sub(r"[^\w\s]", "", value)  # drop punctuation
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
@@ -284,7 +284,10 @@ def _http_get_json(
     )
     try:
         response.raise_for_status()
-        print(f"Discogs API request successful: {response.status_code} {response.reason}")
+        if response.status_code != 200:
+            print(f"Discogs API request failed: {response.status_code} {response.reason}")
+        # else:
+          #  print(f"Discogs API request successful: {response.status_code} {response.reason}")
     except requests.HTTPError as exc:
         if response.status_code == 401:
             raise requests.HTTPError(
@@ -476,7 +479,6 @@ def first_release_year(
 
     if dc:
         try:
-            print("Searching Discogs...")
             dc_year = _discogs_first_year(song_title, artist, file_mode=file_mode, mb=mb)
             if dc_year:
                 print(
@@ -484,14 +486,13 @@ def first_release_year(
                 )
             else:
                 print(
-                    f"Could not find a release year for {artist} - {song_title} in Discogs."
+                    f"{'\033[93m'}Could not find a release year for {artist} - {song_title} in Discogs.{'\033[0m'}"
                 )
         except requests.RequestException:
             dc_year = None
 
     if wp:
         try:
-            print("Searching Wikipedia...")
             wp_year = get_first_release_year_wp(song_title, artist, file_mode)
             if wp_year:
                 print(f"{artist} - {song_title}. Found release year: {wp_year} in Wikipedia.")
@@ -851,17 +852,18 @@ class ReleaseYearApp:
             file_mode=file_mode
             if mb:
                 _wait_for_mb_slot()
-                mb_year = get_first_release_year_mb(
-                    title,
+                mb_year = lookup_musicbrainz(
                     artist,
+                    title,
                     file_mode,
                 )
                 if mb_year:
+                    mb_year = _extract_year(mb_year)
                     print(
                         f"{artist} - {title}. Found release year: {mb_year} in MusicBrainz."
                     )
                 else:
-                    print(f"Could not find a release year for {artist} - {title} in MusicBrainz.")
+                    print(f"{'\033[91m'}Could not find a release year for {artist} - {title} in MusicBrainz.{'\033[0m'}")
             else:
                 mb_year = None
             dc_wp_year = first_release_year(
